@@ -1,0 +1,11 @@
+streamlit
+tensorflow
+transformers
+librosa
+soundfile
+numpy
+audioread
+scipy
+numba
+llvmlite
+gdown
