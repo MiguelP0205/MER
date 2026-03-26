@@ -9,12 +9,12 @@ from transformers import AutoTokenizer
 import gdown
 import zipfile
 
-MODEL_ZIP_PATH = "model.zip"
 MODEL_DIR = "model"
+MODEL_ZIP_PATH = "model.zip"
 
 def descargar_y_extraer_modelo():
-    if not os.path.exists(MODEL_DIR):
-        url = "https://drive.google.com/file/d/1l6vrPW5zFq6Yf9NFiBPvFgm0VSlJJnRU/view?usp=sharing"
+    if not os.path.exists(os.path.join(MODEL_DIR, "saved_model.pb")):
+        url = "https://drive.google.com/uc?id=1l6vrPW5zFq6Yf9NFiBPvFgm0VSlJJnRU"
 
         print("Descargando modelo...")
         gdown.download(url, MODEL_ZIP_PATH, quiet=False)
@@ -23,6 +23,7 @@ def descargar_y_extraer_modelo():
         with zipfile.ZipFile(MODEL_ZIP_PATH, 'r') as zip_ref:
             zip_ref.extractall(".")
 
+        os.remove(MODEL_ZIP_PATH)
         print("Modelo listo ✅")
 
 # ==========================
