@@ -315,8 +315,8 @@ def predict_and_format_song(
         "song_info": {
             "audio_file": audio_file_name,
             "lyric_file": lyric_file_name,
-            "title": title if title else os.path.splitext(audio_file_name)[0],
-            "artist": artist if artist else "Unknown",
+            "title": title if title else "Not provided",
+            "artist": artist if artist else "Not provided",
         },
         "emotions": emotions_output,
         "moods_classification": moods_output,

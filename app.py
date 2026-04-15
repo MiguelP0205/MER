@@ -88,15 +88,69 @@ if st.button("🔍 Analizar"):
 
     st.success("Listo ✅")
 
-    st.subheader("Salida JSON")
-    st.code(result_json_str, language="json")
-
-    # (Opcional) vista amigable
     data = json.loads(result_json_str)
-    st.subheader("Emotions")
-    st.json(data.get("emotions", {}))
-    st.subheader("Moods")
-    st.json(data.get("moods_classification", []))
+
+    song = data["song_info"]
+    emotions = data["emotions"]
+    moods = data["moods_classification"]
+
+    st.subheader("🎶 Song Analysis")
+
+    st.markdown(f"""
+    **Title:** {song["title"]}  
+    **Artist:** {song["artist"]}  
+    """)
+
+    st.divider()
+
+    # =========================
+    # EMOTIONAL PROFILE
+    # =========================
+    st.subheader("💡 Emotional Interpretation")
+
+    st.markdown(f"""
+    Based on both the **audio characteristics** and the **lyrical content**, the model suggests that this song is most closely associated with:
+
+    ### 👉 *{emotions["description"]}*
+
+    This interpretation comes from two core dimensions:
+
+    - **Valence ({emotions["valence_normalized"]})** → reflects how *positive or negative* the emotional tone is.
+    - **Arousal ({emotions["arousal_normalized"]})** → indicates the level of *energy or intensity*.
+
+    Together, these place the song in **Quadrant {emotions["predicted_quadrant"]}**, which helps describe its overall emotional character.
+
+    ⚠️ *Note: These values are model-based estimations and may vary depending on musical context and interpretation.*
+    """)
+
+    st.divider()
+
+    # =========================
+    # MOODS
+    # =========================
+    st.subheader("🎭 Mood Breakdown")
+
+    if moods:
+        st.markdown("""
+    The following moods were identified as the most relevant for this song.
+    Percentages represent their relative contribution among detected moods:
+    """)
+
+        for mood in moods:
+            st.markdown(f"- **{mood['mood']}** → {mood['percentage']}%")
+
+        st.markdown("""
+    💡 *These moods are not exclusive — a song can express multiple emotional tones at the same time.*
+    """)
+
+    else:
+        st.info("No dominant moods were detected above the selected threshold.")
+
+        data = json.loads(result_json_str)
+
+    with st.expander("📄 View JSON output"):
+        st.code(result_json_str, language="json")
+        st.json(data)
 
     st.download_button(
     "Descargar JSON",
