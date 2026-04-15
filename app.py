@@ -78,8 +78,8 @@ if st.button("🔍 Analizar"):
                 audio_file_path=audio_path,
                 lyric_file_path=lyric_path,
                 lyric_text=lyric_text_value,
-                title=title if title else None,
-                artist=artist if artist else None,
+                title=title if title else "Not provided",
+                artist=artist if artist else "Not provided",
                 mood_threshold=mood_threshold,
             )
         except Exception as e:
