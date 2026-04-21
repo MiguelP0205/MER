@@ -125,6 +125,16 @@ if st.button("🔍 Analizar"):
     emotions = data["emotions"]
     moods = data["moods_classification"]
     top_mood = moods[0]["mood"] if moods else "Emotion"
+    quadrant = emotions["predicted_quadrant"]
+
+    if quadrant == "Q1":
+        quadrant_text = "This corresponds to a **high-energy positive emotional region**, often associated with feelings such as happiness, excitement, or joy."
+    elif quadrant == "Q2":
+        quadrant_text = "This corresponds to a **high-energy negative emotional region**, typically linked to emotions like anger, tension, or stress."
+    elif quadrant == "Q3":
+        quadrant_text = "This corresponds to a **low-energy negative emotional region**, commonly related to sadness, melancholy, or introspection."
+    else:
+        quadrant_text = "This corresponds to a **low-energy positive emotional region**, often reflecting calmness, relaxation, or peacefulness."
 
     st.subheader("🎶 Song Analysis")
 
@@ -149,8 +159,9 @@ if st.button("🔍 Analizar"):
 
     - **Valence ({emotions["valence_normalized"]})** → reflects how *positive or negative* the emotional tone is.
     - **Arousal ({emotions["arousal_normalized"]})** → indicates the level of *energy or intensity*.
+    - **Quadrant {emotions["predicted_quadrant"]}** → {quadrant_text}
 
-    Together, these place the song in **Quadrant {emotions["predicted_quadrant"]}**, which helps describe its overall emotional character.
+    This helps to describe its overall emotional character.
 
     ⚠️ *Note: These values are model-based estimations and may vary depending on musical context and interpretation.*
     """)
