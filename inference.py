@@ -47,21 +47,22 @@ AUDIO_DURATION_SECONDS = 30
 MAX_LEN = 256
 
 MOOD_LABELS = [
-    "Aggressive/Hostile",
-    "Calm/Peaceful",
-    "Dark/Ominous",
-    "Energetic/Upbeat",
-    "Experimental/Eccentric",
-    "Gritty/Raw",
-    "Intense/Powerful",
-    "Other",
-    "Playful/Light",
-    "Reflective",
-    "Romantic/Intimate",
-    "Sad/Melancholy",
-    "Sentimental/Poignant",
-    "Sophisticated/Refined",
-    "Warm/Positive",
+    "Happy", 
+    "Elated", 
+    "Enthusiastic", 
+    "Excited/Alert",
+    "Tense", 
+    "Nervous", 
+    "Stressed", 
+    "Upset",
+    "Sad", 
+    "Depressed", 
+    "Sluggish", 
+    "Bored",
+    "Calm", 
+    "Relaxed", 
+    "Serene", 
+    "Contented"
 ]
 
 # ==========================
