@@ -16,99 +16,123 @@ from transformers import AutoTokenizer
 import gdown
 
 # =========================================================
-# PARCHE DE INTERCEPCIÓN EN __CALL__ Y CALL PARA TRANSFORMERS
+# PARCHE UNIVERSAL PARA LAYER.__CALL__ Y PROCESS_NODE EN TF_KERAS
 # =========================================================
 
-def make_robust_call(original_fn):
-    def safe_wrapper(self, *args, **kwargs):
-        clean_kwargs = dict(kwargs)
-        clean_kwargs.pop("mask", None)
+def safe_layer_invoke(fn, self_obj, *args, **kwargs):
+    clean_kwargs = dict(kwargs)
+    clean_kwargs.pop("mask", None)
 
-        args_list = list(args)
+    args_list = list(args)
 
-        # 1. Inspeccionar la firma del método call de la capa objetivo
-        try:
-            target_fn = getattr(self, "call", original_fn)
-            sig = inspect.signature(target_fn)
-            params = sig.parameters
-            has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
-            param_names = [p for p in params.keys() if p != 'self']
-        except Exception:
-            sig = None
-            has_var_kw = True
-            param_names = []
+    # 1. Determinar firma del método call de la instancia
+    target_call = getattr(self_obj, "call", fn)
+    try:
+        sig = inspect.signature(target_call)
+        params = sig.parameters
+        has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+        param_names = [p for p in params.keys() if p != 'self']
+    except Exception:
+        sig = None
+        has_var_kw = True
+        param_names = []
 
-        # 2. Desempaquetar si args[0] es una lista de tensores (ej. [hidden_states, input_tensor])
-        if len(args_list) == 1 and isinstance(args_list[0], (list, tuple)):
-            inner = args_list[0]
-            if len(param_names) > 1 and not (len(param_names) == 1 and param_names[0] == 'inputs'):
-                args_list = list(inner)
+    # 2. Desempaquetar si args[0] es una lista/tupla de tensores
+    if len(args_list) == 1 and isinstance(args_list[0], (list, tuple)):
+        inner = args_list[0]
+        if len(param_names) > 1 and not (len(param_names) == 1 and param_names[0] == 'inputs'):
+            args_list = list(inner)
 
-        elif len(args_list) == 1 and isinstance(args_list[0], dict):
-            inner_dict = args_list[0]
-            for k, v in inner_dict.items():
-                if not param_names or k in param_names:
-                    clean_kwargs[k] = v
-            args_list = []
+    elif len(args_list) == 1 and isinstance(args_list[0], dict):
+        inner_dict = args_list[0]
+        for k, v in inner_dict.items():
+            if not param_names or k in param_names:
+                clean_kwargs[k] = v
+        args_list = []
 
-        # 3. Filtrar kwargs si el método de la capa no soporta **kwargs
-        if sig is not None and not has_var_kw:
-            clean_kwargs = {k: v for k, v in clean_kwargs.items() if k in param_names}
+    # 3. Filtrar kwargs no soportados por la firma
+    if sig is not None and not has_var_kw:
+        clean_kwargs = {k: v for k, v in clean_kwargs.items() if k in param_names}
 
-        # 4. Eliminar argumentos de kwargs que ya están vinculados posicionalmente
-        for idx in range(len(args_list)):
-            if idx < len(param_names):
-                clean_kwargs.pop(param_names[idx], None)
+    # 4. Eliminar kwargs duplicados ya pasados de forma posicional
+    for idx in range(len(args_list)):
+        if idx < len(param_names):
+            clean_kwargs.pop(param_names[idx], None)
 
-        # 5. Ejecutar invocación
-        try:
-            out = original_fn(self, *args_list, **clean_kwargs)
-        except TypeError:
-            if len(args) == 1 and isinstance(args[0], (list, tuple)):
-                out = original_fn(self, *args[0])
-            else:
-                raise
+    # 5. Ejecutar la llamada original
+    try:
+        out = fn(self_obj, *args_list, **clean_kwargs)
+    except TypeError:
+        if len(args_list) >= 1 and isinstance(args_list[0], (list, tuple)):
+            out = fn(self_obj, *args_list[0])
+        else:
+            out = target_call(*args_list, **clean_kwargs)
 
-        # 6. Convertir dataclasses de Hugging Face a tuplas legibles por Keras
-        if hasattr(out, "to_tuple"):
-            return out.to_tuple()
-        elif isinstance(out, dict):
-            return tuple(out.values())
-        return out
-
-    return safe_wrapper
+    # 6. Convertir salidas dataclass de HuggingFace a tuplas para Keras
+    if hasattr(out, "to_tuple"):
+        return out.to_tuple()
+    elif isinstance(out, dict):
+        return tuple(out.values())
+    return out
 
 
-def apply_transformers_patches():
-    modules_to_patch = [
-        "transformers",
-        "transformers.modeling_tf_utils",
-        "transformers.models.roberta.modeling_tf_roberta",
-    ]
-    for mod_name in modules_to_patch:
+def apply_base_layer_patches():
+    # Parchear las clases base Layer de todos los motores Keras/TF_Keras
+    base_layer_classes = []
+    
+    for mod_name, class_name in [
+        ("tf_keras.src.engine.base_layer", "Layer"),
+        ("keras.src.engine.base_layer", "Layer"),
+        ("keras.src.layers", "Layer"),
+        ("keras.layers", "Layer"),
+        ("tensorflow.keras.layers", "Layer"),
+    ]:
         try:
             m = importlib.import_module(mod_name)
-            for name, cls in getattr(m, "__dict__", {}).items():
-                if isinstance(cls, type):
-                    # Parchear __call__
-                    if hasattr(cls, "__call__"):
-                        orig_call = getattr(cls, "__call__")
-                        if not getattr(orig_call, "_is_patched", False):
-                            patched = make_robust_call(orig_call)
-                            patched._is_patched = True
-                            setattr(cls, "__call__", patched)
-                    # Parchear call
-                    if hasattr(cls, "call"):
-                        orig_call_fn = getattr(cls, "call")
-                        if not getattr(orig_call_fn, "_is_patched", False):
-                            patched_fn = make_robust_call(orig_call_fn)
-                            patched_fn._is_patched = True
-                            setattr(cls, "call", patched_fn)
+            cls = getattr(m, class_name, None)
+            if cls and cls not in base_layer_classes:
+                base_layer_classes.append(cls)
         except Exception:
             pass
 
-# Aplicar parche al importar el archivo
-apply_transformers_patches()
+    for cls in base_layer_classes:
+        if hasattr(cls, "__call__"):
+            orig_call = getattr(cls, "__call__")
+            if not getattr(orig_call, "_is_patched", False):
+                def make_wrapper(original_fn):
+                    def wrapper(self, *args, **kwargs):
+                        try:
+                            return original_fn(self, *args, **kwargs)
+                        except TypeError:
+                            return safe_layer_invoke(original_fn, self, *args, **kwargs)
+                    wrapper._is_patched = True
+                    return wrapper
+
+                setattr(cls, "__call__", make_wrapper(orig_call))
+
+    # Parchear directamente process_node de tf_keras.src.engine.functional
+    try:
+        import tf_keras.src.engine.functional as tf_keras_functional
+        if hasattr(tf_keras_functional, "process_node"):
+            orig_process_node = tf_keras_functional.process_node
+            if not getattr(orig_process_node, "_is_patched", False):
+                def patched_process_node(layer, node_data):
+                    try:
+                        return orig_process_node(layer, node_data)
+                    except TypeError:
+                        # Si process_node falla en layer(input_tensors, **kwargs), interceptar la capa
+                        orig_layer_call = layer.__class__.__call__
+                        def temp_layer_call(self, *args, **kwargs):
+                            return safe_layer_invoke(orig_layer_call, self, *args, **kwargs)
+                        layer.__class__.__call__ = temp_layer_call
+                        return orig_process_node(layer, node_data)
+
+                patched_process_node._is_patched = True
+                tf_keras_functional.process_node = patched_process_node
+    except Exception:
+        pass
+
+apply_base_layer_patches()
 
 # =========================================================
 # PARCHE RESILIENTE DE DESERIALIZACIÓN EN KERAS
@@ -198,7 +222,7 @@ MOOD_LABELS = [
 
 def load_model():
     descargar_modelo()
-    apply_transformers_patches()
+    apply_base_layer_patches()
     
     import transformers
     try:
