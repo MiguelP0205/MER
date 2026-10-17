@@ -1,11 +1,30 @@
 import os
 import json
+import tempfile
 import numpy as np
 import librosa
+
+# =========================================================
+# 1. CONFIGURACIÓN DE ENTORNO (Debe ir ANTES de TF/Transformers)
+# =========================================================
+os.environ["TF_USE_LEGACY_KERAS"] = "1"
+os.environ["USE_TF"] = "1"
+
 import tensorflow as tf
 from tensorflow import keras
-from transformers import AutoTokenizer, TFRobertaModel
-from transformers.models.roberta.modeling_tf_roberta import TFRobertaMainLayer
+
+# Importación segura de Transformers y componentes de RoBERTa
+from transformers import AutoTokenizer
+try:
+    from transformers import TFRobertaModel
+except ImportError:
+    from transformers import TFAutoModel as TFRobertaModel
+
+try:
+    from transformers.models.roberta.modeling_tf_roberta import TFRobertaMainLayer
+except Exception:
+    TFRobertaMainLayer = None
+
 import gdown
 
 # ==========================
@@ -63,17 +82,22 @@ MOOD_LABELS = [
 def load_model():
     descargar_modelo()
     
-    # Diccionario con las capas personalizadas de HuggingFace RoBERTa
+    # Mapeo de capas personalizadas para deserializar RoBERTa
     custom_objects = {
         "TFRobertaModel": TFRobertaModel,
-        "TFRobertaMainLayer": TFRobertaMainLayer,
     }
-    
-    return tf.keras.models.load_model(
-        MODEL_PATH, 
-        custom_objects=custom_objects, 
-        compile=False
-    )
+    if TFRobertaMainLayer is not None:
+        custom_objects["TFRobertaMainLayer"] = TFRobertaMainLayer
+
+    try:
+        return tf.keras.models.load_model(
+            MODEL_PATH, 
+            custom_objects=custom_objects, 
+            compile=False
+        )
+    except Exception as e:
+        print(f"Advertencia al cargar con custom_objects: {e}. Intentando carga directa...")
+        return tf.keras.models.load_model(MODEL_PATH, compile=False)
 
 def load_tokenizer():
     return AutoTokenizer.from_pretrained(TOKENIZER_NAME)
@@ -216,7 +240,6 @@ def predict_and_format_song(
     # Fallback posicional si no se identificaron por forma
     if moods_fused_pred is None or va_fused_pred is None:
         if len(output_list) >= 2:
-            # Asumimos que la primera salida o la segunda corresponden
             moods_fused_pred = output_list[0][0]
             va_fused_pred = output_list[1][0]
         else:
