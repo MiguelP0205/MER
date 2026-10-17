@@ -5,14 +5,72 @@ os.environ["USE_TF"] = "1"
 
 import json
 import tempfile
+import importlib
 import numpy as np
 import librosa
 
-# 1. Importar Keras nativo directamente (NO from tensorflow import keras)
+# Importar Keras y TensorFlow
 import keras
 import tensorflow as tf
 from transformers import AutoTokenizer
 import gdown
+
+# =========================================================
+# PARCHE DE DESERIALIZACIÓN PARA KERAS 3 + TRANSFORMERS
+# =========================================================
+try:
+    from keras.src.saving import serialization_lib
+    _original_retrieve_class_or_fn = serialization_lib._retrieve_class_or_fn
+
+    def _robust_retrieve_class_or_fn(name, registered_name, module, obj_type, full_config, custom_objects=None):
+        # 1. Intentar recuperación nativa de Keras
+        try:
+            return _original_retrieve_class_or_fn(name, registered_name, module, obj_type, full_config, custom_objects)
+        except (TypeError, ValueError):
+            pass
+
+        # 2. Generar variaciones de claves para búsqueda
+        keys_to_check = [
+            registered_name,
+            name,
+            registered_name.split(">")[-1] if registered_name else None,
+            name.split(">")[-1] if name else None,
+            registered_name.split(".")[-1] if registered_name else None,
+            name.split(".")[-1] if name else None,
+        ]
+        keys_to_check = [k for k in keys_to_check if k]
+
+        # 3. Buscar en custom_objects recibidos
+        if custom_objects:
+            for k in keys_to_check:
+                if k in custom_objects:
+                    return custom_objects[k]
+
+        # 4. Intentar importación dinámica en el módulo especificado
+        if module:
+            try:
+                mod = importlib.import_module(module)
+                for k in keys_to_check:
+                    if hasattr(mod, k):
+                        return getattr(mod, k)
+            except Exception:
+                pass
+
+        # 5. Búsqueda de respaldo en transformers y roberta
+        for fallback_mod_name in ["transformers", "transformers.models.roberta.modeling_tf_roberta"]:
+            try:
+                mod = importlib.import_module(fallback_mod_name)
+                for k in keys_to_check:
+                    if hasattr(mod, k):
+                        return getattr(mod, k)
+            except Exception:
+                pass
+
+        raise TypeError(f"No se pudo localizar {obj_type} '{name}' (registered_name='{registered_name}')")
+
+    serialization_lib._retrieve_class_or_fn = _robust_retrieve_class_or_fn
+except Exception as e:
+    print(f"Aviso al aplicar parche de deserializacion: {e}")
 
 # ==========================
 # CONFIGURACIÓN BÁSICA Y DESCARGA
@@ -51,7 +109,6 @@ MOOD_LABELS = [
 def load_model():
     descargar_modelo()
     
-    # 1. Importar los módulos de transformers
     import transformers
     try:
         import transformers.models.roberta.modeling_tf_roberta as roberta_mod
@@ -61,31 +118,14 @@ def load_model():
     custom_objects = {}
     modules_to_scan = [m for m in [transformers, roberta_mod] if m is not None]
 
-    # 2. Registrar cada clase en el registro de Keras 3
     for mod in modules_to_scan:
         for name, cls in getattr(mod, "__dict__", {}).items():
             if isinstance(cls, type):
-                # Registro oficial por decorador/función de Keras 3
-                try:
-                    keras.saving.register_keras_serializable(package="transformers", name=name)(cls)
-                    keras.saving.register_keras_serializable(package="Custom", name=name)(cls)
-                    keras.saving.register_keras_serializable(package=mod.__name__, name=name)(cls)
-                except Exception:
-                    pass
-
-                # Registro directo por llaves
                 custom_objects[name] = cls
                 custom_objects[f"Custom>{name}"] = cls
                 custom_objects[f"transformers>{name}"] = cls
                 custom_objects[f"{mod.__name__}>{name}"] = cls
 
-    # 3. Actualizar el registro global de objetos personalizados de Keras 3
-    try:
-        keras.saving.get_custom_objects().update(custom_objects)
-    except Exception:
-        pass
-
-    # 4. Carga usando custom_object_scope nativo de Keras
     try:
         scope = keras.utils.custom_object_scope(custom_objects)
     except AttributeError:
