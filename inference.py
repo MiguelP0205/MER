@@ -6,30 +6,85 @@ os.environ["USE_TF"] = "1"
 import json
 import tempfile
 import importlib
+import functools
 import numpy as np
 import librosa
 
-# Importar Keras y TensorFlow
 import keras
 import tensorflow as tf
 from transformers import AutoTokenizer
 import gdown
 
 # =========================================================
-# PARCHE DE DESERIALIZACIÓN PARA KERAS 3 + TRANSFORMERS
+# PARCHE DE DESERIALIZACIÓN Y LLAMADA A CAPAS ROBERTA
+# =========================================================
+
+def make_robust_call(original_call):
+    @functools.wraps(original_call)
+    def safe_call(self, inputs=None, *args, **kwargs):
+        # 1. Limpiar kwargs duplicados si inputs viene en lista o diccionario
+        if isinstance(inputs, (list, tuple)):
+            kwargs.pop("attention_mask", None)
+            kwargs.pop("token_type_ids", None)
+            kwargs.pop("position_ids", None)
+        elif isinstance(inputs, dict):
+            for k in list(inputs.keys()):
+                kwargs.pop(k, None)
+
+        kwargs.pop("mask", None)
+
+        # 2. Ejecutar la llamada a la capa con manejo de excepciones
+        try:
+            out = original_call(self, inputs, *args, **kwargs)
+        except TypeError:
+            if isinstance(inputs, (list, tuple)) and len(inputs) >= 1:
+                first_input = inputs[0]
+                att_mask = inputs[1] if len(inputs) > 1 else kwargs.get("attention_mask", None)
+                out = original_call(self, first_input, attention_mask=att_mask)
+            elif isinstance(inputs, dict):
+                out = original_call(self, **inputs)
+            else:
+                raise
+
+        # 3. Convertir salidas de HuggingFace (TFBaseModelOutput) a tuplas de tensores
+        if hasattr(out, "to_tuple"):
+            return out.to_tuple()
+        elif isinstance(out, dict):
+            return tuple(out.values())
+        return out
+
+    return safe_call
+
+
+def apply_transformers_patches():
+    try:
+        import transformers.models.roberta.modeling_tf_roberta as roberta_mod
+        for name, cls in getattr(roberta_mod, "__dict__", {}).items():
+            if isinstance(cls, type) and hasattr(cls, "call"):
+                orig_call = getattr(cls, "call")
+                if not getattr(orig_call, "_is_patched", False):
+                    patched = make_robust_call(orig_call)
+                    patched._is_patched = True
+                    setattr(cls, "call", patched)
+    except Exception as e:
+        print(f"Aviso al aplicar parche a RoBERTa: {e}")
+
+# Aplicar parches al importar el módulo
+apply_transformers_patches()
+
+# =========================================================
+# PARCHE RESILIENTE DE BÚSQUEDA DE CLASES EN KERAS 3
 # =========================================================
 try:
     from keras.src.saving import serialization_lib
     _original_retrieve_class_or_fn = serialization_lib._retrieve_class_or_fn
 
     def _robust_retrieve_class_or_fn(name, registered_name, module, obj_type, full_config, custom_objects=None):
-        # 1. Intentar recuperación nativa de Keras
         try:
             return _original_retrieve_class_or_fn(name, registered_name, module, obj_type, full_config, custom_objects)
         except (TypeError, ValueError):
             pass
 
-        # 2. Generar variaciones de claves para búsqueda
         keys_to_check = [
             registered_name,
             name,
@@ -40,13 +95,11 @@ try:
         ]
         keys_to_check = [k for k in keys_to_check if k]
 
-        # 3. Buscar en custom_objects recibidos
         if custom_objects:
             for k in keys_to_check:
                 if k in custom_objects:
                     return custom_objects[k]
 
-        # 4. Intentar importación dinámica en el módulo especificado
         if module:
             try:
                 mod = importlib.import_module(module)
@@ -56,7 +109,6 @@ try:
             except Exception:
                 pass
 
-        # 5. Búsqueda de respaldo en transformers y roberta
         for fallback_mod_name in ["transformers", "transformers.models.roberta.modeling_tf_roberta"]:
             try:
                 mod = importlib.import_module(fallback_mod_name)
@@ -70,7 +122,7 @@ try:
 
     serialization_lib._retrieve_class_or_fn = _robust_retrieve_class_or_fn
 except Exception as e:
-    print(f"Aviso al aplicar parche de deserializacion: {e}")
+    print(f"Aviso en parche de deserialización: {e}")
 
 # ==========================
 # CONFIGURACIÓN BÁSICA Y DESCARGA
@@ -108,6 +160,7 @@ MOOD_LABELS = [
 
 def load_model():
     descargar_modelo()
+    apply_transformers_patches()
     
     import transformers
     try:
@@ -126,17 +179,26 @@ def load_model():
                 custom_objects[f"transformers>{name}"] = cls
                 custom_objects[f"{mod.__name__}>{name}"] = cls
 
+    # Intentar carga con Keras / TensorFlow
     try:
-        scope = keras.utils.custom_object_scope(custom_objects)
-    except AttributeError:
-        scope = keras.saving.custom_object_scope(custom_objects)
-
-    with scope:
-        return keras.models.load_model(
+        return tf.keras.models.load_model(
             MODEL_PATH, 
-            compile=False,
-            safe_mode=False
+            custom_objects=custom_objects, 
+            compile=False
         )
+    except Exception as e1:
+        print(f"Aviso en carga con tf.keras: {e1}. Intentando con keras nativo...")
+        try:
+            scope = keras.utils.custom_object_scope(custom_objects)
+        except AttributeError:
+            scope = keras.saving.custom_object_scope(custom_objects)
+
+        with scope:
+            return keras.models.load_model(
+                MODEL_PATH, 
+                compile=False,
+                safe_mode=False
+            )
 
 def load_tokenizer():
     return AutoTokenizer.from_pretrained(TOKENIZER_NAME)
