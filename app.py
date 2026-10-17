@@ -1,6 +1,4 @@
 import os
-# Configuración de variables de entorno (¡DEBE IR AL INICIO DE TODO!)
-os.environ["TF_USE_LEGACY_KERAS"] = "1"
 os.environ["USE_TF"] = "1"
 
 import json
@@ -9,7 +7,7 @@ import streamlit as st
 import matplotlib.pyplot as plt
 
 # =========================================================
-# 1. CONFIGURACIÓN DE PÁGINA (¡DEBE SER EL PRIMER COMANDO DE STREAMLIT!)
+# 1. CONFIGURACIÓN DE PÁGINA
 # =========================================================
 st.set_page_config(
     page_title="MER-ID | Reconocimiento de Emociones", 

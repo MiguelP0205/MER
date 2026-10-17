@@ -1,7 +1,6 @@
 import os
 
-# Configuración de compatibilidad Keras/TF para Transformers
-os.environ["TF_USE_LEGACY_KERAS"] = "1"
+# Configuración de entorno para Transformers
 os.environ["USE_TF"] = "1"
 
 import json
@@ -52,28 +51,28 @@ def load_model():
     
     custom_objects = {}
 
-    # Importación diferida para evitar fallos en el modulo al arrancar la app
     try:
         from transformers import TFRobertaModel
         custom_objects["TFRobertaModel"] = TFRobertaModel
     except Exception as e:
-        print(f"Aviso: No se pudo importar TFRobertaModel: {e}")
+        print(f"Aviso al importar TFRobertaModel: {e}")
 
     try:
         from transformers.models.roberta.modeling_tf_roberta import TFRobertaMainLayer
         custom_objects["TFRobertaMainLayer"] = TFRobertaMainLayer
     except Exception as e:
-        print(f"Aviso: No se pudo importar TFRobertaMainLayer: {e}")
+        print(f"Aviso al importar TFRobertaMainLayer: {e}")
 
     try:
-        return tf.keras.models.load_model(
+        return keras.models.load_model(
             MODEL_PATH, 
-            custom_objects=custom_objects if custom_objects else None, 
-            compile=False
+            custom_objects=custom_objects, 
+            compile=False,
+            safe_mode=False
         )
     except Exception as e:
-        print(f"Carga con custom_objects fallo ({e}). Intentando carga nativa directa...")
-        return tf.keras.models.load_model(MODEL_PATH, compile=False)
+        print(f"Carga con custom_objects fallo ({e}). Intentando carga directa...")
+        return keras.models.load_model(MODEL_PATH, compile=False, safe_mode=False)
 
 def load_tokenizer():
     return AutoTokenizer.from_pretrained(TOKENIZER_NAME)
