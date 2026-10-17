@@ -49,20 +49,34 @@ MOOD_LABELS = [
 def load_model():
     descargar_modelo()
     
+    # 1. Obtener las clases de HuggingFace Transformers
     custom_objects = {}
-
+    
     try:
         from transformers import TFRobertaModel
+        # Mapeamos todas las posibles firmas con las que Keras pudo haber guardado la capa
         custom_objects["TFRobertaModel"] = TFRobertaModel
+        custom_objects["Custom>TFRobertaModel"] = TFRobertaModel
+        custom_objects["transformers>TFRobertaModel"] = TFRobertaModel
     except Exception as e:
         print(f"Aviso al importar TFRobertaModel: {e}")
 
     try:
         from transformers.models.roberta.modeling_tf_roberta import TFRobertaMainLayer
         custom_objects["TFRobertaMainLayer"] = TFRobertaMainLayer
+        custom_objects["Custom>TFRobertaMainLayer"] = TFRobertaMainLayer
+        custom_objects["transformers>TFRobertaMainLayer"] = TFRobertaMainLayer
     except Exception as e:
         print(f"Aviso al importar TFRobertaMainLayer: {e}")
 
+    # 2. Registrar globalmente en el registro de Keras 3
+    try:
+        from keras.saving import get_custom_objects
+        get_custom_objects().update(custom_objects)
+    except Exception:
+        pass
+
+    # 3. Cargar el modelo pasando el diccionario explícito
     try:
         return keras.models.load_model(
             MODEL_PATH, 
@@ -71,7 +85,7 @@ def load_model():
             safe_mode=False
         )
     except Exception as e:
-        print(f"Carga con custom_objects fallo ({e}). Intentando carga directa...")
+        print(f"Error en primera carga ({e}). Intentando fallback...")
         return keras.models.load_model(MODEL_PATH, compile=False, safe_mode=False)
 
 def load_tokenizer():
