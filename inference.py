@@ -22,47 +22,79 @@ import gdown
 def make_robust_call(original_call):
     @functools.wraps(original_call)
     def safe_call(self, *args, **kwargs):
-        # Convierte args a lista modificable si viene como tupla
         args_list = list(args)
 
-        # Si process_node pasa múltiples argumentos posicionales (e.g. input_ids, attention_mask),
-        # eliminamos las llaves duplicadas de kwargs para evitar:
-        # "TypeError: call() got multiple values for argument 'attention_mask'"
-        if len(args_list) >= 2:
-            kwargs.pop("attention_mask", None)
-        if len(args_list) >= 3:
-            kwargs.pop("token_type_ids", None)
-        if len(args_list) >= 4:
-            kwargs.pop("position_ids", None)
-
-        # Si viene un solo argumento que es una lista [input_ids, attention_mask]
-        if len(args_list) == 1 and isinstance(args_list[0], (list, tuple)):
-            inputs_inner = args_list[0]
-            if len(inputs_inner) >= 2:
-                kwargs.pop("attention_mask", None)
-
-        # Limpiar argumento residual de máscara de Keras
+        # Siempre eliminar la máscara interna que inyecta Keras Functional
         kwargs.pop("mask", None)
 
-        return original_call(self, *args_list, **kwargs)
+        # Caso 1: Las entradas vienen empaquetadas en una lista/tupla en args[0]
+        if len(args_list) == 1 and isinstance(args_list[0], (list, tuple)):
+            inner_inputs = args_list[0]
+            if len(inner_inputs) >= 2:
+                kwargs.pop("attention_mask", None)
+            if len(inner_inputs) >= 3:
+                kwargs.pop("token_type_ids", None)
+            if len(inner_inputs) >= 4:
+                kwargs.pop("position_ids", None)
+
+        # Caso 2: Las entradas vienen en un diccionario en args[0]
+        elif len(args_list) == 1 and isinstance(args_list[0], dict):
+            for k in args_list[0].keys():
+                kwargs.pop(k, None)
+
+        # Caso 3: Múltiples argumentos posicionales directos
+        elif len(args_list) >= 2:
+            kwargs.pop("attention_mask", None)
+            if len(args_list) >= 3:
+                kwargs.pop("token_type_ids", None)
+            if len(args_list) >= 4:
+                kwargs.pop("position_ids", None)
+
+        try:
+            return original_call(self, *args_list, **kwargs)
+        except TypeError as err:
+            # Fallback en caso de incompatibilidad estricta de firma
+            if len(args_list) == 1 and isinstance(args_list[0], (list, tuple)):
+                inner = args_list[0]
+                kw = {k: v for k, v in kwargs.items() if k not in ("attention_mask", "token_type_ids", "position_ids")}
+                if len(inner) == 1:
+                    return original_call(self, inner[0], **kw)
+                elif len(inner) == 2:
+                    return original_call(self, inner[0], attention_mask=inner[1], **kw)
+                elif len(inner) >= 3:
+                    return original_call(self, inner[0], attention_mask=inner[1], token_type_ids=inner[2], **kw)
+            elif len(args_list) == 1 and isinstance(args_list[0], dict):
+                d = dict(args_list[0])
+                kw = {k: v for k, v in kwargs.items() if k not in d}
+                return original_call(self, **d, **kw)
+            raise err
 
     return safe_call
 
 
 def apply_transformers_patches():
-    try:
-        import transformers.models.roberta.modeling_tf_roberta as roberta_mod
-        for name, cls in getattr(roberta_mod, "__dict__", {}).items():
+    modules_to_patch = []
+    for mod_name in [
+        "transformers",
+        "transformers.modeling_tf_utils",
+        "transformers.models.roberta.modeling_tf_roberta",
+    ]:
+        try:
+            m = importlib.import_module(mod_name)
+            modules_to_patch.append(m)
+        except Exception:
+            pass
+
+    for mod in modules_to_patch:
+        for name, cls in getattr(mod, "__dict__", {}).items():
             if isinstance(cls, type) and hasattr(cls, "call"):
                 orig_call = getattr(cls, "call")
                 if not getattr(orig_call, "_is_patched", False):
                     patched = make_robust_call(orig_call)
                     patched._is_patched = True
                     setattr(cls, "call", patched)
-    except Exception as e:
-        print(f"Aviso al aplicar parche a RoBERTa: {e}")
 
-# Aplicar parche a nivel de módulo al importar
+# Aplicar parche al importar el archivo
 apply_transformers_patches()
 
 # =========================================================
@@ -172,7 +204,6 @@ def load_model():
                 custom_objects[f"transformers>{name}"] = cls
                 custom_objects[f"{mod.__name__}>{name}"] = cls
 
-    # Intentar carga con Keras / TensorFlow
     try:
         return tf.keras.models.load_model(
             MODEL_PATH, 
