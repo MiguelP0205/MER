@@ -16,42 +16,35 @@ from transformers import AutoTokenizer
 import gdown
 
 # =========================================================
-# PARCHE DE DESERIALIZACIÓN Y LLAMADA A CAPAS ROBERTA
+# PARCHE DE INTERCEPCIÓN PARA CAPAS DE TRANSFORMERS
 # =========================================================
 
 def make_robust_call(original_call):
     @functools.wraps(original_call)
-    def safe_call(self, inputs=None, *args, **kwargs):
-        # 1. Limpiar kwargs duplicados si inputs viene en lista o diccionario
-        if isinstance(inputs, (list, tuple)):
-            kwargs.pop("attention_mask", None)
-            kwargs.pop("token_type_ids", None)
-            kwargs.pop("position_ids", None)
-        elif isinstance(inputs, dict):
-            for k in list(inputs.keys()):
-                kwargs.pop(k, None)
+    def safe_call(self, *args, **kwargs):
+        # Convierte args a lista modificable si viene como tupla
+        args_list = list(args)
 
+        # Si process_node pasa múltiples argumentos posicionales (e.g. input_ids, attention_mask),
+        # eliminamos las llaves duplicadas de kwargs para evitar:
+        # "TypeError: call() got multiple values for argument 'attention_mask'"
+        if len(args_list) >= 2:
+            kwargs.pop("attention_mask", None)
+        if len(args_list) >= 3:
+            kwargs.pop("token_type_ids", None)
+        if len(args_list) >= 4:
+            kwargs.pop("position_ids", None)
+
+        # Si viene un solo argumento que es una lista [input_ids, attention_mask]
+        if len(args_list) == 1 and isinstance(args_list[0], (list, tuple)):
+            inputs_inner = args_list[0]
+            if len(inputs_inner) >= 2:
+                kwargs.pop("attention_mask", None)
+
+        # Limpiar argumento residual de máscara de Keras
         kwargs.pop("mask", None)
 
-        # 2. Ejecutar la llamada a la capa con manejo de excepciones
-        try:
-            out = original_call(self, inputs, *args, **kwargs)
-        except TypeError:
-            if isinstance(inputs, (list, tuple)) and len(inputs) >= 1:
-                first_input = inputs[0]
-                att_mask = inputs[1] if len(inputs) > 1 else kwargs.get("attention_mask", None)
-                out = original_call(self, first_input, attention_mask=att_mask)
-            elif isinstance(inputs, dict):
-                out = original_call(self, **inputs)
-            else:
-                raise
-
-        # 3. Convertir salidas de HuggingFace (TFBaseModelOutput) a tuplas de tensores
-        if hasattr(out, "to_tuple"):
-            return out.to_tuple()
-        elif isinstance(out, dict):
-            return tuple(out.values())
-        return out
+        return original_call(self, *args_list, **kwargs)
 
     return safe_call
 
@@ -69,11 +62,11 @@ def apply_transformers_patches():
     except Exception as e:
         print(f"Aviso al aplicar parche a RoBERTa: {e}")
 
-# Aplicar parches al importar el módulo
+# Aplicar parche a nivel de módulo al importar
 apply_transformers_patches()
 
 # =========================================================
-# PARCHE RESILIENTE DE BÚSQUEDA DE CLASES EN KERAS 3
+# PARCHE RESILIENTE DE DESERIALIZACIÓN EN KERAS
 # =========================================================
 try:
     from keras.src.saving import serialization_lib
