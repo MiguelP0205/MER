@@ -16,14 +16,20 @@ from transformers import AutoTokenizer
 import gdown
 
 # =========================================================
-# PARCHE CON INSPECCIÓN DE FIRMA PARA CAPAS DE TRANSFORMERS
+# PARCHE DE INTERCEPCIÓN EN __CALL__ Y CALL PARA TRANSFORMERS
 # =========================================================
 
-def make_signature_aware_call(original_call):
-    def safe_call(self, *args, **kwargs):
-        # 1. Obtener la firma del método original .call()
+def make_robust_call(original_fn):
+    def safe_wrapper(self, *args, **kwargs):
+        clean_kwargs = dict(kwargs)
+        clean_kwargs.pop("mask", None)
+
+        args_list = list(args)
+
+        # 1. Inspeccionar la firma del método call de la capa objetivo
         try:
-            sig = inspect.signature(original_call)
+            target_fn = getattr(self, "call", original_fn)
+            sig = inspect.signature(target_fn)
             params = sig.parameters
             has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
             param_names = [p for p in params.keys() if p != 'self']
@@ -32,23 +38,11 @@ def make_signature_aware_call(original_call):
             has_var_kw = True
             param_names = []
 
-        args_list = list(args)
-        clean_kwargs = dict(kwargs)
-
-        # Eliminar siempre el argumento de máscara interno de Keras
-        clean_kwargs.pop("mask", None)
-
-        # 2. Manejar desempaquetado si args[0] es una lista/tupla (e.g. [input_ids, attention_mask])
-        bound_param_names = set()
+        # 2. Desempaquetar si args[0] es una lista de tensores (ej. [hidden_states, input_tensor])
         if len(args_list) == 1 and isinstance(args_list[0], (list, tuple)):
-            inner_list = args_list[0]
+            inner = args_list[0]
             if len(param_names) > 1 and not (len(param_names) == 1 and param_names[0] == 'inputs'):
-                args_list = list(inner_list)
-                for idx in range(len(args_list)):
-                    if idx < len(param_names):
-                        bound_param_names.add(param_names[idx])
-            else:
-                bound_param_names.add(param_names[0] if param_names else 'inputs')
+                args_list = list(inner)
 
         elif len(args_list) == 1 and isinstance(args_list[0], dict):
             inner_dict = args_list[0]
@@ -57,55 +51,63 @@ def make_signature_aware_call(original_call):
                     clean_kwargs[k] = v
             args_list = []
 
-        else:
-            for idx in range(len(args_list)):
-                if idx < len(param_names):
-                    bound_param_names.add(param_names[idx])
-
-        # 3. Eliminar kwargs que ya fueron pasados de forma posicional para evitar duplicados
-        for p_name in bound_param_names:
-            clean_kwargs.pop(p_name, None)
-
-        # 4. Si el método NO acepta **kwargs en su firma, filtrar argumentos no reconocidos
+        # 3. Filtrar kwargs si el método de la capa no soporta **kwargs
         if sig is not None and not has_var_kw:
             clean_kwargs = {k: v for k, v in clean_kwargs.items() if k in param_names}
 
-        # 5. Ejecutar la llamada a la capa
-        out = original_call(self, *args_list, **clean_kwargs)
+        # 4. Eliminar argumentos de kwargs que ya están vinculados posicionalmente
+        for idx in range(len(args_list)):
+            if idx < len(param_names):
+                clean_kwargs.pop(param_names[idx], None)
 
-        # 6. Convertir salidas de Hugging Face (TFBaseModelOutput) a tuplas compatibles con Keras
+        # 5. Ejecutar invocación
+        try:
+            out = original_fn(self, *args_list, **clean_kwargs)
+        except TypeError:
+            if len(args) == 1 and isinstance(args[0], (list, tuple)):
+                out = original_fn(self, *args[0])
+            else:
+                raise
+
+        # 6. Convertir dataclasses de Hugging Face a tuplas legibles por Keras
         if hasattr(out, "to_tuple"):
             return out.to_tuple()
         elif isinstance(out, dict):
             return tuple(out.values())
         return out
 
-    return safe_call
+    return safe_wrapper
 
 
 def apply_transformers_patches():
-    modules_to_patch = []
-    for mod_name in [
+    modules_to_patch = [
         "transformers",
         "transformers.modeling_tf_utils",
         "transformers.models.roberta.modeling_tf_roberta",
-    ]:
+    ]
+    for mod_name in modules_to_patch:
         try:
             m = importlib.import_module(mod_name)
-            modules_to_patch.append(m)
+            for name, cls in getattr(m, "__dict__", {}).items():
+                if isinstance(cls, type):
+                    # Parchear __call__
+                    if hasattr(cls, "__call__"):
+                        orig_call = getattr(cls, "__call__")
+                        if not getattr(orig_call, "_is_patched", False):
+                            patched = make_robust_call(orig_call)
+                            patched._is_patched = True
+                            setattr(cls, "__call__", patched)
+                    # Parchear call
+                    if hasattr(cls, "call"):
+                        orig_call_fn = getattr(cls, "call")
+                        if not getattr(orig_call_fn, "_is_patched", False):
+                            patched_fn = make_robust_call(orig_call_fn)
+                            patched_fn._is_patched = True
+                            setattr(cls, "call", patched_fn)
         except Exception:
             pass
 
-    for mod in modules_to_patch:
-        for name, cls in getattr(mod, "__dict__", {}).items():
-            if isinstance(cls, type) and hasattr(cls, "call"):
-                orig_call = getattr(cls, "call")
-                if not getattr(orig_call, "_is_patched", False):
-                    patched = make_signature_aware_call(orig_call)
-                    patched._is_patched = True
-                    setattr(cls, "call", patched)
-
-# Aplicar parche al importar el módulo
+# Aplicar parche al importar el archivo
 apply_transformers_patches()
 
 # =========================================================
