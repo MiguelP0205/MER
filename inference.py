@@ -49,47 +49,57 @@ MOOD_LABELS = [
 def load_model():
     descargar_modelo()
     
-    # 1. Importar módulos de Transformers
+    # 1. Importar los módulos de transformers
     import transformers
     try:
         import transformers.models.roberta.modeling_tf_roberta as roberta_mod
     except Exception:
         roberta_mod = None
 
-    # 2. Escanear y registrar TODAS las clases/subcapas de RoBERTa dinámicamente
     custom_objects = {}
-    modules_to_scan = [transformers]
-    if roberta_mod:
-        modules_to_scan.append(roberta_mod)
+    modules_to_scan = [m for m in [transformers, roberta_mod] if m is not None]
 
+    # 2. Registrar cada clase con la función oficial de Keras 3 y en el diccionario
     for mod in modules_to_scan:
         for name, cls in getattr(mod, "__dict__", {}).items():
             if isinstance(cls, type):
-                # Registramos bajo el nombre simple y todos los prefijos posibles de Keras 3
+                # Registrar oficialmente en el registro global de Keras 3 con varios prefijos
+                try:
+                    keras.saving.register_keras_serializable(package="transformers", name=name)(cls)
+                    keras.saving.register_keras_serializable(package="Custom", name=name)(cls)
+                    keras.saving.register_keras_serializable(package=mod.__name__, name=name)(cls)
+                except Exception:
+                    pass
+
+                # Mapear todas las combinaciones posibles para la búsqueda por clave
                 custom_objects[name] = cls
                 custom_objects[f"Custom>{name}"] = cls
                 custom_objects[f"transformers>{name}"] = cls
-                if roberta_mod:
-                    custom_objects[f"transformers.models.roberta.modeling_tf_roberta>{name}"] = cls
+                custom_objects[f"{mod.__name__}>{name}"] = cls
 
-    # 3. Registrar globalmente en el sistema de guardado de Keras 3
+    # 3. Registrar en el diccionario global de Keras
     try:
         from keras.saving import get_custom_objects
         get_custom_objects().update(custom_objects)
     except Exception as e:
         print(f"Aviso al actualizar get_custom_objects: {e}")
 
-    # 4. Carga final del modelo
+    # 4. Cargar el modelo asegurando el ámbito (custom_object_scope)
     try:
+        with keras.saving.custom_object_scope(custom_objects):
+            return keras.models.load_model(
+                MODEL_PATH, 
+                compile=False,
+                safe_mode=False
+            )
+    except Exception as e:
+        print(f"Aviso en carga con scope ({e}). Intentando carga directa...")
         return keras.models.load_model(
             MODEL_PATH, 
             custom_objects=custom_objects, 
-            compile=False,
+            compile=False, 
             safe_mode=False
         )
-    except Exception as e:
-        print(f"Error en primera carga ({e}). Intentando fallback...")
-        return keras.models.load_model(MODEL_PATH, compile=False, safe_mode=False)
 
 def load_tokenizer():
     return AutoTokenizer.from_pretrained(TOKENIZER_NAME)
