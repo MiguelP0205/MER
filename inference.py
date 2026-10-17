@@ -7,8 +7,10 @@ import json
 import tempfile
 import numpy as np
 import librosa
+
+# 1. Importar Keras nativo directamente (NO from tensorflow import keras)
+import keras
 import tensorflow as tf
-from tensorflow import keras
 from transformers import AutoTokenizer
 import gdown
 
@@ -59,11 +61,11 @@ def load_model():
     custom_objects = {}
     modules_to_scan = [m for m in [transformers, roberta_mod] if m is not None]
 
-    # 2. Registrar cada clase con la función oficial de Keras 3 y en el diccionario
+    # 2. Registrar cada clase en el registro de Keras 3
     for mod in modules_to_scan:
         for name, cls in getattr(mod, "__dict__", {}).items():
             if isinstance(cls, type):
-                # Registrar oficialmente en el registro global de Keras 3 con varios prefijos
+                # Registro oficial por decorador/función de Keras 3
                 try:
                     keras.saving.register_keras_serializable(package="transformers", name=name)(cls)
                     keras.saving.register_keras_serializable(package="Custom", name=name)(cls)
@@ -71,33 +73,28 @@ def load_model():
                 except Exception:
                     pass
 
-                # Mapear todas las combinaciones posibles para la búsqueda por clave
+                # Registro directo por llaves
                 custom_objects[name] = cls
                 custom_objects[f"Custom>{name}"] = cls
                 custom_objects[f"transformers>{name}"] = cls
                 custom_objects[f"{mod.__name__}>{name}"] = cls
 
-    # 3. Registrar en el diccionario global de Keras
+    # 3. Actualizar el registro global de objetos personalizados de Keras 3
     try:
-        from keras.saving import get_custom_objects
-        get_custom_objects().update(custom_objects)
-    except Exception as e:
-        print(f"Aviso al actualizar get_custom_objects: {e}")
+        keras.saving.get_custom_objects().update(custom_objects)
+    except Exception:
+        pass
 
-    # 4. Cargar el modelo asegurando el ámbito (custom_object_scope)
+    # 4. Carga usando custom_object_scope nativo de Keras
     try:
-        with keras.saving.custom_object_scope(custom_objects):
-            return keras.models.load_model(
-                MODEL_PATH, 
-                compile=False,
-                safe_mode=False
-            )
-    except Exception as e:
-        print(f"Aviso en carga con scope ({e}). Intentando carga directa...")
+        scope = keras.utils.custom_object_scope(custom_objects)
+    except AttributeError:
+        scope = keras.saving.custom_object_scope(custom_objects)
+
+    with scope:
         return keras.models.load_model(
             MODEL_PATH, 
-            custom_objects=custom_objects, 
-            compile=False, 
+            compile=False,
             safe_mode=False
         )
 
