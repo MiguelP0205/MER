@@ -6,6 +6,7 @@ os.environ["USE_TF"] = "1"
 import json
 import tempfile
 import importlib
+import inspect
 import numpy as np
 import librosa
 
@@ -15,60 +16,64 @@ from transformers import AutoTokenizer
 import gdown
 
 # =========================================================
-# PARCHE DE INTERCEPCIÓN PARA CAPAS DE TRANSFORMERS
+# PARCHE CON INSPECCIÓN DE FIRMA PARA CAPAS DE TRANSFORMERS
 # =========================================================
 
-def make_robust_call(original_call):
-    # NOTA: Sin @functools.wraps para permitir (*args, **kwargs) dinámicos
+def make_signature_aware_call(original_call):
     def safe_call(self, *args, **kwargs):
-        args_list = list(args)
-
-        # Siempre eliminar la máscara interna que inyecta Keras Functional
-        kwargs.pop("mask", None)
-
-        # Caso 1: Entradas empaquetadas en lista/tupla en args[0]
-        if len(args_list) >= 1:
-            first = args_list[0]
-            if isinstance(first, (list, tuple)):
-                if len(first) >= 2:
-                    kwargs.pop("attention_mask", None)
-                if len(first) >= 3:
-                    kwargs.pop("token_type_ids", None)
-                if len(first) >= 4:
-                    kwargs.pop("position_ids", None)
-            elif isinstance(first, dict):
-                for k in list(first.keys()):
-                    kwargs.pop(k, None)
-
-        # Caso 2: Múltiples argumentos posicionales directos
-        if len(args_list) >= 2:
-            kwargs.pop("attention_mask", None)
-        if len(args_list) >= 3:
-            kwargs.pop("token_type_ids", None)
-        if len(args_list) >= 4:
-            kwargs.pop("position_ids", None)
-
+        # 1. Obtener la firma del método original .call()
         try:
-            out = original_call(self, *args_list, **kwargs)
-        except TypeError as err:
-            # Fallback dinámico de firma
-            if len(args_list) == 1 and isinstance(args_list[0], (list, tuple)):
-                inner = args_list[0]
-                kw = {k: v for k, v in kwargs.items() if k not in ("attention_mask", "token_type_ids", "position_ids")}
-                if len(inner) == 1:
-                    out = original_call(self, inner[0], **kw)
-                elif len(inner) == 2:
-                    out = original_call(self, inner[0], attention_mask=inner[1], **kw)
-                elif len(inner) >= 3:
-                    out = original_call(self, inner[0], attention_mask=inner[1], token_type_ids=inner[2], **kw)
-            elif len(args_list) == 1 and isinstance(args_list[0], dict):
-                d = dict(args_list[0])
-                kw = {k: v for k, v in kwargs.items() if k not in d}
-                out = original_call(self, **d, **kw)
-            else:
-                raise err
+            sig = inspect.signature(original_call)
+            params = sig.parameters
+            has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+            param_names = [p for p in params.keys() if p != 'self']
+        except Exception:
+            sig = None
+            has_var_kw = True
+            param_names = []
 
-        # Convertir TFBaseModelOutput a tuplas compatibles con Keras
+        args_list = list(args)
+        clean_kwargs = dict(kwargs)
+
+        # Eliminar siempre el argumento de máscara interno de Keras
+        clean_kwargs.pop("mask", None)
+
+        # 2. Manejar desempaquetado si args[0] es una lista/tupla (e.g. [input_ids, attention_mask])
+        bound_param_names = set()
+        if len(args_list) == 1 and isinstance(args_list[0], (list, tuple)):
+            inner_list = args_list[0]
+            if len(param_names) > 1 and not (len(param_names) == 1 and param_names[0] == 'inputs'):
+                args_list = list(inner_list)
+                for idx in range(len(args_list)):
+                    if idx < len(param_names):
+                        bound_param_names.add(param_names[idx])
+            else:
+                bound_param_names.add(param_names[0] if param_names else 'inputs')
+
+        elif len(args_list) == 1 and isinstance(args_list[0], dict):
+            inner_dict = args_list[0]
+            for k, v in inner_dict.items():
+                if not param_names or k in param_names:
+                    clean_kwargs[k] = v
+            args_list = []
+
+        else:
+            for idx in range(len(args_list)):
+                if idx < len(param_names):
+                    bound_param_names.add(param_names[idx])
+
+        # 3. Eliminar kwargs que ya fueron pasados de forma posicional para evitar duplicados
+        for p_name in bound_param_names:
+            clean_kwargs.pop(p_name, None)
+
+        # 4. Si el método NO acepta **kwargs en su firma, filtrar argumentos no reconocidos
+        if sig is not None and not has_var_kw:
+            clean_kwargs = {k: v for k, v in clean_kwargs.items() if k in param_names}
+
+        # 5. Ejecutar la llamada a la capa
+        out = original_call(self, *args_list, **clean_kwargs)
+
+        # 6. Convertir salidas de Hugging Face (TFBaseModelOutput) a tuplas compatibles con Keras
         if hasattr(out, "to_tuple"):
             return out.to_tuple()
         elif isinstance(out, dict):
@@ -96,11 +101,11 @@ def apply_transformers_patches():
             if isinstance(cls, type) and hasattr(cls, "call"):
                 orig_call = getattr(cls, "call")
                 if not getattr(orig_call, "_is_patched", False):
-                    patched = make_robust_call(orig_call)
+                    patched = make_signature_aware_call(orig_call)
                     patched._is_patched = True
                     setattr(cls, "call", patched)
 
-# Aplicar parches al importar el archivo
+# Aplicar parche al importar el módulo
 apply_transformers_patches()
 
 # =========================================================
