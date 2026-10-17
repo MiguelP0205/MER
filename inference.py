@@ -49,34 +49,37 @@ MOOD_LABELS = [
 def load_model():
     descargar_modelo()
     
-    # 1. Obtener las clases de HuggingFace Transformers
+    # 1. Importar módulos de Transformers
+    import transformers
+    try:
+        import transformers.models.roberta.modeling_tf_roberta as roberta_mod
+    except Exception:
+        roberta_mod = None
+
+    # 2. Escanear y registrar TODAS las clases/subcapas de RoBERTa dinámicamente
     custom_objects = {}
-    
-    try:
-        from transformers import TFRobertaModel
-        # Mapeamos todas las posibles firmas con las que Keras pudo haber guardado la capa
-        custom_objects["TFRobertaModel"] = TFRobertaModel
-        custom_objects["Custom>TFRobertaModel"] = TFRobertaModel
-        custom_objects["transformers>TFRobertaModel"] = TFRobertaModel
-    except Exception as e:
-        print(f"Aviso al importar TFRobertaModel: {e}")
+    modules_to_scan = [transformers]
+    if roberta_mod:
+        modules_to_scan.append(roberta_mod)
 
-    try:
-        from transformers.models.roberta.modeling_tf_roberta import TFRobertaMainLayer
-        custom_objects["TFRobertaMainLayer"] = TFRobertaMainLayer
-        custom_objects["Custom>TFRobertaMainLayer"] = TFRobertaMainLayer
-        custom_objects["transformers>TFRobertaMainLayer"] = TFRobertaMainLayer
-    except Exception as e:
-        print(f"Aviso al importar TFRobertaMainLayer: {e}")
+    for mod in modules_to_scan:
+        for name, cls in getattr(mod, "__dict__", {}).items():
+            if isinstance(cls, type):
+                # Registramos bajo el nombre simple y todos los prefijos posibles de Keras 3
+                custom_objects[name] = cls
+                custom_objects[f"Custom>{name}"] = cls
+                custom_objects[f"transformers>{name}"] = cls
+                if roberta_mod:
+                    custom_objects[f"transformers.models.roberta.modeling_tf_roberta>{name}"] = cls
 
-    # 2. Registrar globalmente en el registro de Keras 3
+    # 3. Registrar globalmente en el sistema de guardado de Keras 3
     try:
         from keras.saving import get_custom_objects
         get_custom_objects().update(custom_objects)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Aviso al actualizar get_custom_objects: {e}")
 
-    # 3. Cargar el modelo pasando el diccionario explícito
+    # 4. Carga final del modelo
     try:
         return keras.models.load_model(
             MODEL_PATH, 
