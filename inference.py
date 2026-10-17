@@ -4,7 +4,8 @@ import numpy as np
 import librosa
 import tensorflow as tf
 from tensorflow import keras
-from transformers import AutoTokenizer, TFRobertaModel, TFRobertaMainLayer
+from transformers import AutoTokenizer, TFRobertaModel
+from transformers.models.roberta.modeling_tf_roberta import TFRobertaMainLayer
 import gdown
 
 # ==========================

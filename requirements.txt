@@ -1,12 +1,7 @@
 streamlit
 tensorflow
+tf-keras
 transformers
 librosa
-soundfile
-numpy
-audioread
-scipy
-numba
-llvmlite
 gdown
 matplotlib
