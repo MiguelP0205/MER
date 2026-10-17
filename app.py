@@ -3,15 +3,33 @@ import tempfile
 import streamlit as st
 import matplotlib.pyplot as plt
 
+# =========================================================
+# 1. CONFIGURACIÓN DE PÁGINA (¡DEBE SER EL PRIMER COMANDO!)
+# =========================================================
+st.set_page_config(
+    page_title="MER-ID | Reconocimiento de Emociones", 
+    page_icon="🎵",
+    layout="wide"
+)
+
+# =========================================================
+# 2. INYECCIÓN CSS (Ocultar Header, Footer y Menú GitHub)
+# =========================================================
+hide_streamlit_style = """
+    <style>
+    #MainMenu {visibility: hidden;} /* Oculta el menú de los 3 puntos */
+    footer {visibility: hidden;}    /* Oculta el pie de página "Made with Streamlit" */
+    header {visibility: hidden;}    /* Oculta la barra superior con el icono de GitHub */
+    </style>
+"""
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
+# Importamos las funciones actualizadas de inference.py
 from inference import load_model, load_tokenizer, predict_and_format_song
 
-st.set_page_config(page_title="Music Mood & Emotions", layout="centered")
-st.title("🎵 Predicción de emociones y moods")
-st.caption("Entradas: audio (mp3/wav/ogg) + letra (archivo .txt o texto). Salida: JSON.")
-
-# =========================
-# INTERPRETACIÓN AUTOMÁTICA
-# =========================
+# =========================================================
+# 3. INTERPRETACIÓN AUTOMÁTICA
+# =========================================================
 def generate_emotional_interpretation(valence, arousal):
     if valence >= 0 and arousal >= 0:
         tone = "energetic and positive"
@@ -39,6 +57,9 @@ Overall, the song presents a **{tone}** profile, {extra}.
 It carries **{intensity_desc}**, which shapes how the emotion is perceived throughout the track.
 """
 
+# =========================================================
+# 4. CARGA MODELO Y TOKENIZER CON CACHÉ
+# =========================================================
 @st.cache_resource
 def get_model_and_tokenizer():
     model = load_model()
@@ -46,6 +67,12 @@ def get_model_and_tokenizer():
     return model, tok
 
 model, tokenizer = get_model_and_tokenizer()
+
+# =========================================================
+# 5. INTERFAZ Y COMPONENTES DE ENTRADA
+# =========================================================
+st.title("🎵 Predicción de Emociones y Moods (MER-ID)")
+st.caption("Entradas: Audio (.mp3, .wav, .ogg) + Letra (.txt o texto directo). Salida: Reporte de inferencia en tiempo real + JSON.")
 
 audio_file = st.file_uploader("Sube el audio", type=["mp3", "wav", "ogg"])
 
@@ -71,6 +98,9 @@ with col2:
 
 mood_threshold = st.slider("Umbral para incluir mood", 0.0, 0.9, 0.3, 0.05)
 
+# =========================================================
+# 6. EJECUCIÓN DE INFERENCIA
+# =========================================================
 if st.button("🔍 Analizar"):
     if audio_file is None:
         st.error("Sube un archivo de audio primero.")
@@ -84,7 +114,7 @@ if st.button("🔍 Analizar"):
         st.error("Debes pegar o escribir la letra.")
         st.stop()
 
-    with st.spinner("Procesando..."):
+    with st.spinner("Procesando señal acústica y texto..."):
         # Guardar audio temporal
         suffix = "." + audio_file.name.split(".")[-1].lower()
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_audio:
@@ -110,14 +140,14 @@ if st.button("🔍 Analizar"):
                 lyric_file_path=lyric_path,
                 lyric_text=lyric_text_value,
                 title=title if title else "Not provided",
-                artist= artist if artist else "Not provided",
+                artist=artist if artist else "Not provided",
                 mood_threshold=mood_threshold,
             )
         except Exception as e:
-            st.error(f"Error en inferencia: {e}")
+            st.error(f"Error en la inferencia: {e}")
             st.stop()
 
-    st.success("Listo ✅")
+    st.success("Análisis completado ✅")
 
     data = json.loads(result_json_str)
 
@@ -166,7 +196,7 @@ if st.button("🔍 Analizar"):
     ⚠️ *Note: These values are model-based estimations and may vary depending on musical context and interpretation.*
     """)
 
-    # 🔥 INTERPRETACIÓN AUTOMÁTICA
+    # INTERPRETACIÓN AUTOMÁTICA
     interpretation = generate_emotional_interpretation(
         emotions["valence_normalized"],
         emotions["arousal_normalized"]
@@ -178,29 +208,29 @@ if st.button("🔍 Analizar"):
     st.divider()
 
     # =========================
-    # GRÁFICO
+    # GRÁFICO CARTESIANO DE RUSSELL
     # =========================
     st.subheader("📊 Emotional Quadrant")
 
     valence = emotions["valence_normalized"]
     arousal = emotions["arousal_normalized"]
 
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(6, 5))
 
-    ax.axhline(0)
-    ax.axvline(0)
+    ax.axhline(0, color='gray', linestyle='--', linewidth=0.8)
+    ax.axvline(0, color='gray', linestyle='--', linewidth=0.8)
 
-    ax.scatter(valence, arousal, s=100)
+    ax.scatter(valence, arousal, s=120, color='black', zorder=5)
 
-    # Determinar cuadrante
+    # Determinar color por cuadrante
     if valence >= 0 and arousal >= 0:
-        color = "#FFD6E8"  # pastel rosado (Happy)
+        color = "#FFD6E8"  # pastel rosado (Q1)
     elif valence < 0 and arousal >= 0:
-        color = "#FFE5CC"  # pastel naranja (Angry)
+        color = "#FFE5CC"  # pastel naranja (Q2)
     elif valence < 0 and arousal < 0:
-        color = "#D6E0FF"  # pastel azul (Sad)
+        color = "#D6E0FF"  # pastel azul (Q3)
     else:
-        color = "#D6F5E8"  # pastel verde (Calm)
+        color = "#D6F5E8"  # pastel verde (Q4)
 
     # Pintar cuadrante correspondiente
     if valence >= 0 and arousal >= 0:
@@ -217,54 +247,52 @@ if st.button("🔍 Analizar"):
 
     ax.set_xlabel("Valence (Negative → Positive)")
     ax.set_ylabel("Arousal (Low → High)")
-    ax.set_title("Emotion Position")
+    ax.set_title("Emotion Position in Russell's Circumplex")
 
-    ax.text(valence, arousal, f"  {top_mood}", verticalalignment='bottom')
+    ax.text(valence, arousal, f"  {top_mood}", verticalalignment='bottom', fontweight='bold')
 
-    # Labels cuadrantes
-    ax.text(0.5, 0.8, "Q1\nHappy / Excited")
-    ax.text(-0.8, 0.8, "Q2\nAngry / Stressed")
-    ax.text(-0.8, -0.8, "Q3\nSad / Depressed")
-    ax.text(0.5, -0.8, "Q4\nCalm / Relaxed")
+    # Etiquetado de cuadrantes
+    ax.text(0.5, 0.8, "Q1\nHappy / Excited", ha='center', va='center')
+    ax.text(-0.5, 0.8, "Q2\nAngry / Stressed", ha='center', va='center')
+    ax.text(-0.5, -0.8, "Q3\nSad / Depressed", ha='center', va='center')
+    ax.text(0.5, -0.8, "Q4\nCalm / Relaxed", ha='center', va='center')
 
     st.pyplot(fig)
+    plt.close(fig) # Liberar memoria RAM del gráfico
 
     st.divider()
 
     # =========================
-    # MOODS
+    # DESGLOSE DE MOODS
     # =========================
     st.subheader("🎭 Mood Breakdown")
 
     if moods:
         st.markdown("""
-    The following moods were identified as the most relevant for this song.
-    Percentages represent their relative contribution among detected moods:
-    """)
+        The following moods were identified as the most relevant for this song.
+        Percentages represent their relative contribution among detected moods:
+        """)
 
         for mood in moods:
             st.markdown(f"- **{mood['mood']}** → {mood['percentage']}%")
 
         st.markdown("""
-    💡 *These moods are not exclusive — a song can express multiple emotional tones at the same time.*
-    """)
-
+        💡 *These moods are not exclusive — a song can express multiple emotional tones at the same time.*
+        """)
     else:
         st.info("No dominant moods were detected above the selected threshold.")
 
-        data = json.loads(result_json_str)
+    st.divider()
 
     # =========================
-    # JSON OCULTO
+    # INSPECCIÓN Y DESCARGA JSON
     # =========================
     with st.expander("📄 View JSON output"):
-        st.code(result_json_str, language="json")
         st.json(data)
 
     st.download_button(
-    "Descargar JSON",
-    data=result_json_str,
-    file_name="prediccion.json",
-    mime="application/json",
-)
-
+        "Descargar JSON",
+        data=result_json_str,
+        file_name="prediccion.json",
+        mime="application/json",
+    )

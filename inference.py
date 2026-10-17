@@ -7,37 +7,28 @@ from tensorflow import keras
 from transformers import AutoTokenizer
 
 import gdown
-import zipfile
 
-MODEL_DIR = "model"
-MODEL_ZIP_PATH = "model.zip"
+# ==========================
+# CONFIGURACIÓN BÁSICA Y DESCARGA
+# ==========================
 
-def descargar_y_extraer_modelo():
-    if not os.path.exists(os.path.join(MODEL_DIR, "saved_model.pb")):
-        url = "https://drive.google.com/uc?id=1l6vrPW5zFq6Yf9NFiBPvFgm0VSlJJnRU"
+# Nombre del archivo local donde se guardará el modelo
+MODEL_PATH = "my_model.keras"
 
-        print("Descargando modelo...")
-        gdown.download(url, MODEL_ZIP_PATH, quiet=False)
+# ID del archivo my_model.keras en Google Drive
+DRIVE_FILE_ID = "1onGKhJcSQamYZsdJZuC9OKixT5igAaRZ"
 
-        print("Extrayendo modelo...")
-        with zipfile.ZipFile(MODEL_ZIP_PATH, 'r') as zip_ref:
-            zip_ref.extractall(".")
-
-        os.remove(MODEL_ZIP_PATH)
+def descargar_modelo():
+    if not os.path.exists(MODEL_PATH):
+        url = f"https://drive.google.com/uc?id={DRIVE_FILE_ID}"
+        print("Descargando modelo (.keras)...")
+        gdown.download(url, MODEL_PATH, quiet=False)
         print("Modelo listo ✅")
-
-# ==========================
-# CONFIGURACIÓN BÁSICA
-# ==========================
-
-# Carpeta donde guardaste el modelo con model.save("..."):
-# IMPORTANTE: en Streamlit Cloud y GitHub, usa ruta relativa dentro del repo
-MODEL_DIR = "model"
 
 # Tokenizer usado en tu entrenamiento
 TOKENIZER_NAME = "roberta-base"
 
-# Constantes
+# Constantes de audio y texto
 SR = 22050
 N_MELS = 128
 HOP_LENGTH = 512
@@ -66,18 +57,16 @@ MOOD_LABELS = [
 ]
 
 # ==========================
-# CARGA (con cache para Streamlit)
+# CARGA DEL MODELO Y TOKENIZER
 # ==========================
 
-# Streamlit cache_resource está en app.py, aquí dejamos loaders “puros”
 def load_model():
-    # Carga SavedModel (TF) aunque Keras 3 no lo soporte con load_model
-    descargar_y_extraer_modelo()
-    return tf.saved_model.load(MODEL_DIR)
+    descargar_modelo()
+    # Cargamos el archivo .keras con compile=False para inferencia
+    return tf.keras.models.load_model(MODEL_PATH, compile=False)
 
 def load_tokenizer():
     return AutoTokenizer.from_pretrained(TOKENIZER_NAME)
-
 
 # ==========================
 # PREPROCESADO
@@ -134,9 +123,8 @@ def load_lyrics_and_tokenize_from_file(tokenizer, path: str):
         text = f.read()
     return tokenize_lyrics_text(tokenizer, text)
 
-
 # ==========================
-# INFERENCIA + JSON
+# INFERENCIA + FORMATO JSON
 # ==========================
 
 def predict_and_format_song(
@@ -149,9 +137,6 @@ def predict_and_format_song(
     artist: str | None = None,
     mood_threshold: float = 0.3,
 ) -> str:
-    import os
-    import json
-    import tensorflow as tf
 
     if not os.path.exists(audio_file_path):
         raise FileNotFoundError(f"Audio no encontrado: {audio_file_path}")
@@ -174,89 +159,58 @@ def predict_and_format_song(
         input_ids, attention_mask = tokenize_lyrics_text(tokenizer, lyric_text)
         lyric_file_name = None
 
-    # Batch
+    # Lote de dimensión (1, ...)
     melspec_batch = tf.expand_dims(melspec, axis=0)                 # (1, T, n_mels, 1)
     input_ids_batch = tf.expand_dims(input_ids, axis=0)             # (1, MAX_LEN)
     attention_mask_batch = tf.expand_dims(attention_mask, axis=0)   # (1, MAX_LEN)
 
-    # Asegurar dtypes típicos
+    # Convertir a tensores
     melspec_batch = tf.convert_to_tensor(melspec_batch, dtype=tf.float32)
     input_ids_batch = tf.convert_to_tensor(input_ids_batch, dtype=tf.int32)
     attention_mask_batch = tf.convert_to_tensor(attention_mask_batch, dtype=tf.int32)
 
     # ======================
-    # 2) Inferencia (SavedModel)
+    # 2) Inferencia con modelo Keras
     # ======================
-    if not hasattr(model, "signatures") or "serving_default" not in model.signatures:
-        raise ValueError(
-            "El modelo cargado no tiene la firma 'serving_default'. "
-            "Verifica que lo cargas con tf.saved_model.load() y que exportaste un endpoint de serving."
-        )
+    # Intentamos pasar por nombre de entrada, si falla, pasamos por lista ordenada
+    inputs_dict = {
+        "audio_melspec": melspec_batch,
+        "input_ids": input_ids_batch,
+        "attention_mask": attention_mask_batch,
+    }
 
-    infer = model.signatures["serving_default"]
-
-    # Intento 1: usar nombres esperados (los que usabas en model.predict)
     try:
-        outputs = infer(
-            audio_melspec=melspec_batch,
-            input_ids=input_ids_batch,
-            attention_mask=attention_mask_batch,
-        )
-    except TypeError as e:
-        # Si falla, es porque los nombres de entrada no coinciden.
-        # Te damos un mensaje bien claro con los nombres reales.
-        try:
-            input_sig = infer.structured_input_signature
-        except Exception:
-            input_sig = "No disponible"
+        raw_outputs = model(inputs_dict, training=False)
+    except Exception:
+        inputs_list = [melspec_batch, input_ids_batch, attention_mask_batch]
+        raw_outputs = model(inputs_list, training=False)
 
-        raise TypeError(
-            f"No pude llamar a 'serving_default' con los inputs "
-            f"audio_melspec/input_ids/attention_mask.\n\n"
-            f"Firma de entrada detectada:\n{input_sig}\n\n"
-            f"Error original: {e}"
-        )
+    # Normalizar las salidas recibidas a una lista de arrays NumPy
+    if isinstance(raw_outputs, dict):
+        output_list = [v.numpy() for v in raw_outputs.values()]
+    elif isinstance(raw_outputs, (list, tuple)):
+        output_list = [v.numpy() for v in raw_outputs]
+    else:
+        output_list = [raw_outputs.numpy()]
 
-    # outputs es un dict: {nombre_salida: tensor}
-    out_keys = list(outputs.keys())
-    if len(out_keys) < 2:
-        raise ValueError(f"Se esperaban 2 salidas (moods y valence/arousal). Salidas recibidas: {out_keys}")
-
-    # Orden estable por nombre para no depender del orden interno
-    out_keys_sorted = sorted(out_keys)
-
-    # Heurística: gusta identificar VA por su shape (1,2)
     moods_fused_pred = None
     va_fused_pred = None
 
-    for k in out_keys:
-        arr = outputs[k].numpy()
+    # Identificar salidas por forma (shape)
+    for arr in output_list:
         if arr.ndim == 2 and arr.shape[-1] == 2:
             va_fused_pred = arr[0]
-        else:
-            # probable moods: (1, num_moods)
-            if arr.ndim == 2 and arr.shape[0] == 1:
-                moods_fused_pred = arr[0]
+        elif arr.ndim == 2 and arr.shape[-1] == len(MOOD_LABELS):
+            moods_fused_pred = arr[0]
 
-    # Fallback: si la heurística no pudo separar
+    # Fallback posicional si no se identificaron por forma
     if moods_fused_pred is None or va_fused_pred is None:
-        # intenta por orden
-        a = outputs[out_keys_sorted[0]].numpy()
-        b = outputs[out_keys_sorted[1]].numpy()
-        moods_fused_pred = a[0]
-        va_fused_pred = b[0]
-
-        # Si aún no cuadra, avisar con shapes
-        if not (isinstance(va_fused_pred, (list, tuple,)) or getattr(va_fused_pred, "shape", None) is not None):
-            pass
-
-    # Validación mínima
-    if len(va_fused_pred) != 2:
-        shapes = {k: tuple(outputs[k].shape) for k in out_keys}
-        raise ValueError(
-            f"No pude identificar correctamente la salida Valence/Arousal. "
-            f"Shapes de salidas: {shapes}"
-        )
+        if len(output_list) >= 2:
+            # Asumimos que la primera salida o la segunda corresponden
+            moods_fused_pred = output_list[0][0]
+            va_fused_pred = output_list[1][0]
+        else:
+            raise ValueError(f"No se pudieron extraer 2 salidas del modelo Keras. Recibidas: {len(output_list)}")
 
     # ======================
     # 3) Emociones (Valence/Arousal)
@@ -294,7 +248,6 @@ def predict_and_format_song(
     for i, prob in enumerate(moods_fused_pred):
         if float(prob) >= mood_threshold:
             selected_probs.append(float(prob))
-            # proteger si hay mismatch de longitudes
             label = MOOD_LABELS[i] if i < len(MOOD_LABELS) else f"mood_{i}"
             selected_labels.append(label)
 

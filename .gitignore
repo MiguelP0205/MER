@@ -1,6 +1,8 @@
-# Ignorar modelo pesado
+# Ignorar modelos pesados
 model/
 model.zip
+my_model.keras
+*.keras
 
 # Python
 __pycache__/
