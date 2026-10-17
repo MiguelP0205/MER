@@ -4,8 +4,7 @@ import numpy as np
 import librosa
 import tensorflow as tf
 from tensorflow import keras
-from transformers import AutoTokenizer
-
+from transformers import AutoTokenizer, TFRobertaModel, TFRobertaMainLayer
 import gdown
 
 # ==========================
@@ -62,8 +61,18 @@ MOOD_LABELS = [
 
 def load_model():
     descargar_modelo()
-    # Cargamos el archivo .keras con compile=False para inferencia
-    return tf.keras.models.load_model(MODEL_PATH, compile=False)
+    
+    # Diccionario con las capas personalizadas de HuggingFace RoBERTa
+    custom_objects = {
+        "TFRobertaModel": TFRobertaModel,
+        "TFRobertaMainLayer": TFRobertaMainLayer,
+    }
+    
+    return tf.keras.models.load_model(
+        MODEL_PATH, 
+        custom_objects=custom_objects, 
+        compile=False
+    )
 
 def load_tokenizer():
     return AutoTokenizer.from_pretrained(TOKENIZER_NAME)
