@@ -1,7 +1,9 @@
 streamlit
 tensorflow
 tf-keras
-transformers
+transformers==4.44.2
 librosa
+soundfile
 gdown
 matplotlib
+scikit-learn

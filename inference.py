@@ -2,7 +2,7 @@ import os
 import sys
 import zipfile
 
-# Configuración de entorno
+# 1. Configuración de entorno
 os.environ["USE_TF"] = "1"
 os.environ["TF_USE_LEGACY_KERAS"] = "1"
 
@@ -11,7 +11,10 @@ import tempfile
 import numpy as np
 import librosa
 
+# 2. Importar TensorFlow y Keras
 import tensorflow as tf
+
+# 3. Importar Transformers con la versión exacta de Colab
 from transformers import AutoTokenizer, TFRobertaModel
 import gdown
 
