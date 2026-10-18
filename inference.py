@@ -1,5 +1,6 @@
 import os
 import sys
+import inspect
 
 # Forzar configuración de entorno
 os.environ["USE_TF"] = "1"
@@ -22,6 +23,95 @@ try:
     import transformers.models.roberta.modeling_tf_roberta as roberta_mod
 except Exception:
     roberta_mod = None
+
+# =========================================================
+# PARCHE RESILIENTE DE INVOCACIÓN DE CAPAS (SAFE LAYER CALL)
+# =========================================================
+def apply_class_level_layer_patches():
+    """Intercepta la llamada a capas de Keras y HuggingFace para evitar errores de kwargs en la reconstrucción."""
+    layer_classes = []
+
+    for mod_name, class_name in [
+        ("tf_keras.src.engine.base_layer", "Layer"),
+        ("keras.src.engine.base_layer", "Layer"),
+        ("keras.src.layers", "Layer"),
+        ("keras.layers", "Layer"),
+        ("tensorflow.keras.layers", "Layer"),
+        ("transformers.modeling_tf_utils", "TFPreTrainedModel"),
+        ("transformers.models.roberta.modeling_tf_roberta", "TFRobertaPreTrainedModel"),
+        ("transformers.models.roberta.modeling_tf_roberta", "TFRobertaMainLayer"),
+    ]:
+        try:
+            m = importlib.import_module(mod_name)
+            cls = getattr(m, class_name, None)
+            if cls and cls not in layer_classes:
+                layer_classes.append(cls)
+        except Exception:
+            pass
+
+    for cls in layer_classes:
+        if hasattr(cls, "__call__"):
+            orig_call = getattr(cls, "__call__")
+            if not getattr(orig_call, "_is_patched", False):
+                def make_patched_call(original_fn):
+                    def patched_call(self, *args, **kwargs):
+                        # 1. Intentar llamada directa original
+                        try:
+                            return original_fn(self, *args, **kwargs)
+                        except TypeError:
+                            pass
+
+                        # 2. Limpiar kwargs no soportados por capas HF (como 'mask')
+                        clean_kw = dict(kwargs)
+                        clean_kw.pop("mask", None)
+
+                        target_fn = getattr(self, "call", original_fn)
+                        try:
+                            sig = inspect.signature(target_fn)
+                            has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+                            param_names = set(sig.parameters.keys())
+                            if not has_var_kw:
+                                clean_kw = {k: v for k, v in clean_kw.items() if k in param_names}
+                        except Exception:
+                            pass
+
+                        try:
+                            return original_fn(self, *args, **clean_kw)
+                        except TypeError:
+                            pass
+
+                        # 3. Desempaquetar si los tensores vienen dentro de una lista/tupla
+                        if len(args) == 1 and isinstance(args[0], (list, tuple)):
+                            inner_args = args[0]
+                            try:
+                                return original_fn(self, *inner_args, **clean_kw)
+                            except TypeError:
+                                pass
+
+                            kw_no_dups = dict(clean_kw)
+                            kw_no_dups.pop("attention_mask", None)
+                            kw_no_dups.pop("token_type_ids", None)
+                            kw_no_dups.pop("position_ids", None)
+                            try:
+                                return original_fn(self, *inner_args, **kw_no_dups)
+                            except TypeError:
+                                pass
+
+                        # 4. Intentar invocación directa a .call()
+                        if hasattr(self, "call"):
+                            try:
+                                return self.call(*args, **clean_kw)
+                            except TypeError:
+                                pass
+
+                        return original_fn(self, *args)
+
+                    patched_call._is_patched = True
+                    return patched_call
+
+                setattr(cls, "__call__", make_patched_call(orig_call))
+
+apply_class_level_layer_patches()
 
 # =========================================================
 # REGISTRO GLOBAL Y DINÁMICO DE CUSTOM OBJECTS
@@ -54,7 +144,6 @@ def build_custom_objects_registry():
                 if hasattr(mod, "__name__"):
                     GLOBAL_CUSTOM_OBJECTS[f"{mod.__name__}>{name}"] = cls
 
-                # Registrar también en el sistema nativo de Keras 3
                 try:
                     keras.saving.register_keras_serializable(package="Custom", name=name)(cls)
                     keras.saving.register_keras_serializable(package="transformers", name=name)(cls)
@@ -75,13 +164,11 @@ try:
         if custom_objects:
             merged.update(custom_objects)
 
-        # 1. Intento primario con el recuperador original
         try:
             return _orig_retrieve(name, registered_name, module, obj_type, full_config, merged)
         except (TypeError, ValueError):
             pass
 
-        # 2. Búsqueda directa por variantes de nombre
         clean_name = name.split(">")[-1].split(".")[-1] if name else ""
         clean_reg = registered_name.split(">")[-1].split(".")[-1] if registered_name else ""
 
@@ -90,7 +177,6 @@ try:
             if k and k in merged:
                 return merged[k]
 
-        # 3. Intentar importar módulo dinámicamente si viene en la config
         if module:
             try:
                 mod = importlib.import_module(module)
@@ -100,7 +186,6 @@ try:
             except Exception:
                 pass
 
-        # 4. Búsqueda exhaustiva en todos los módulos cargados en memoria
         for search_term in [clean_reg, clean_name]:
             if not search_term:
                 continue
@@ -155,21 +240,33 @@ MOOD_LABELS = [
 
 def load_model():
     descargar_modelo()
+    apply_class_level_layer_patches()
     build_custom_objects_registry()
 
-    # Intentar cargar con keras nativo
+    # 1. Carga mediante keras nativo con Custom Object Scope
     try:
-        return keras.models.load_model(
-            MODEL_PATH,
-            custom_objects=GLOBAL_CUSTOM_OBJECTS,
-            compile=False,
-            safe_mode=False
-        )
+        with keras.saving.custom_object_scope(GLOBAL_CUSTOM_OBJECTS):
+            return keras.models.load_model(
+                MODEL_PATH,
+                compile=False,
+                safe_mode=False
+            )
     except Exception as e1:
         print(f"Aviso carga keras nativo: {e1}. Intentando con tf.keras...")
 
-    # Reintento con tf.keras
-    return tf.keras.models.load_model(
+    # 2. Carga mediante tf.keras
+    try:
+        return tf.keras.models.load_model(
+            MODEL_PATH,
+            custom_objects=GLOBAL_CUSTOM_OBJECTS,
+            compile=False
+        )
+    except Exception as e2:
+        print(f"Aviso carga tf.keras: {e2}. Intentando con tf_keras...")
+
+    # 3. Carga mediante tf_keras
+    import tf_keras as tfk
+    return tfk.models.load_model(
         MODEL_PATH,
         custom_objects=GLOBAL_CUSTOM_OBJECTS,
         compile=False
@@ -283,7 +380,6 @@ def predict_and_format_song(
     else:
         output_list = [raw_outputs.numpy()]
 
-    # Estructura del modelo: [moods_fused, va_fused, moods_audio, moods_text, va_audio, va_text]
     moods_fused_pred = output_list[0][0]
     va_fused_pred = output_list[1][0]
 
