@@ -1,6 +1,7 @@
 import os
+import sys
 
-# Forzar el uso de TensorFlow y legacy Keras para compatibilidad con Transformers
+# Forzar configuración de entorno
 os.environ["USE_TF"] = "1"
 os.environ["TF_USE_LEGACY_KERAS"] = "1"
 
@@ -11,46 +12,60 @@ import numpy as np
 import librosa
 
 import tensorflow as tf
+import keras
 from transformers import AutoTokenizer
 import gdown
 
-# Intentar importar tf_keras (Keras 2 para TF 2.16+)
+# Importar explícitamente el módulo TensorFlow de RoBERTa
+import transformers
 try:
-    import tf_keras as tfk
-except ImportError:
-    tfk = tf.keras
+    import transformers.models.roberta.modeling_tf_roberta as roberta_mod
+except Exception:
+    roberta_mod = None
 
 # =========================================================
-# REGISTRO GLOBAL Y DINÁMICO DE CLASES DE TRANSFORMERS
+# REGISTRO GLOBAL Y DINÁMICO DE CUSTOM OBJECTS
 # =========================================================
 GLOBAL_CUSTOM_OBJECTS = {}
 
 def build_custom_objects_registry():
-    """Registra todas las clases de HuggingFace y Keras para deserialización."""
+    """Escanea y registra todas las clases disponibles en Keras y Transformers."""
     modules_to_scan = [
-        "transformers",
-        "transformers.models.roberta.modeling_tf_roberta",
-        "tf_keras.layers",
-        "tensorflow.keras.layers",
-        "keras.layers",
+        transformers,
+        roberta_mod,
+        keras.layers,
+        tf.keras.layers,
     ]
-    
-    for mod_name in modules_to_scan:
-        try:
-            mod = importlib.import_module(mod_name)
-            for name, cls in getattr(mod, "__dict__", {}).items():
-                if isinstance(cls, type):
-                    GLOBAL_CUSTOM_OBJECTS[name] = cls
-                    GLOBAL_CUSTOM_OBJECTS[f"Custom>{name}"] = cls
-                    GLOBAL_CUSTOM_OBJECTS[f"transformers>{name}"] = cls
-                    if hasattr(mod, "__name__"):
-                        GLOBAL_CUSTOM_OBJECTS[f"{mod.__name__}>{name}"] = cls
-        except Exception:
-            pass
+
+    try:
+        import tf_keras
+        modules_to_scan.append(tf_keras.layers)
+    except Exception:
+        pass
+
+    for mod in modules_to_scan:
+        if mod is None:
+            continue
+        for name, cls in getattr(mod, "__dict__", {}).items():
+            if isinstance(cls, type):
+                GLOBAL_CUSTOM_OBJECTS[name] = cls
+                GLOBAL_CUSTOM_OBJECTS[f"Custom>{name}"] = cls
+                GLOBAL_CUSTOM_OBJECTS[f"transformers>{name}"] = cls
+                if hasattr(mod, "__name__"):
+                    GLOBAL_CUSTOM_OBJECTS[f"{mod.__name__}>{name}"] = cls
+
+                # Registrar también en el sistema nativo de Keras 3
+                try:
+                    keras.saving.register_keras_serializable(package="Custom", name=name)(cls)
+                    keras.saving.register_keras_serializable(package="transformers", name=name)(cls)
+                except Exception:
+                    pass
 
 build_custom_objects_registry()
 
-# Modificar la función de deserialización interna de Keras para buscar en nuestro registro
+# =========================================================
+# PARCHE DE DESERIALIZACIÓN EXHAUSTIVA EN KERAS 3
+# =========================================================
 try:
     import keras.src.saving.serialization_lib as keras_saving
     _orig_retrieve = keras_saving._retrieve_class_or_fn
@@ -59,32 +74,53 @@ try:
         merged = dict(GLOBAL_CUSTOM_OBJECTS)
         if custom_objects:
             merged.update(custom_objects)
-            
+
+        # 1. Intento primario con el recuperador original
         try:
             return _orig_retrieve(name, registered_name, module, obj_type, full_config, merged)
         except (TypeError, ValueError):
             pass
 
-        keys = [registered_name, name]
-        if registered_name:
-            keys.append(registered_name.split(">")[-1])
-            keys.append(registered_name.split(".")[-1])
-        if name:
-            keys.append(name.split(">")[-1])
-            keys.append(name.split(".")[-1])
+        # 2. Búsqueda directa por variantes de nombre
+        clean_name = name.split(">")[-1].split(".")[-1] if name else ""
+        clean_reg = registered_name.split(">")[-1].split(".")[-1] if registered_name else ""
 
-        for k in keys:
+        keys_to_check = [registered_name, name, clean_reg, clean_name]
+        for k in keys_to_check:
             if k and k in merged:
                 return merged[k]
 
-        raise TypeError(f"No se pudo localizar {obj_type} '{name}' (registered_name='{registered_name}')")
+        # 3. Intentar importar módulo dinámicamente si viene en la config
+        if module:
+            try:
+                mod = importlib.import_module(module)
+                for k in [clean_reg, clean_name]:
+                    if k and hasattr(mod, k):
+                        return getattr(mod, k)
+            except Exception:
+                pass
+
+        # 4. Búsqueda exhaustiva en todos los módulos cargados en memoria
+        for search_term in [clean_reg, clean_name]:
+            if not search_term:
+                continue
+            for mod_name, mod in list(sys.modules.items()):
+                if mod and ("transformers" in mod_name or "keras" in mod_name or "tensorflow" in mod_name):
+                    if hasattr(mod, search_term):
+                        obj = getattr(mod, search_term)
+                        if isinstance(obj, type):
+                            return obj
+
+        err_msg = f"No se pudo localizar {obj_type} '{name}' (registered_name='{registered_name}', module='{module}')"
+        print(f"❌ ERROR CRÍTICO DE DESERIALIZACIÓN: {err_msg}")
+        raise TypeError(err_msg)
 
     keras_saving._retrieve_class_or_fn = _robust_retrieve
 except Exception as e:
-    print(f"Nota parche deserializador: {e}")
+    print(f"Aviso parche deserializador: {e}")
 
 # =========================================================
-# CONFIGURACIÓN BÁSICA Y DESCARGA
+# CONFIGURACIÓN BÁSICA Y DESCARGA DE MODELO
 # =========================================================
 
 MODEL_PATH = "my_model.keras"
@@ -121,40 +157,29 @@ def load_model():
     descargar_modelo()
     build_custom_objects_registry()
 
-    # 1. Intentar cargar con tf_keras (el motor más compatible para modelos TF + RoBERTa)
+    # Intentar cargar con keras nativo
     try:
-        return tfk.models.load_model(
+        return keras.models.load_model(
             MODEL_PATH,
             custom_objects=GLOBAL_CUSTOM_OBJECTS,
-            compile=False
+            compile=False,
+            safe_mode=False
         )
     except Exception as e1:
-        print(f"Error cargando con tf_keras: {e1}. Intentando con tf.keras...")
+        print(f"Aviso carga keras nativo: {e1}. Intentando con tf.keras...")
 
-    # 2. Reintento con tf.keras estándar
-    try:
-        return tf.keras.models.load_model(
-            MODEL_PATH,
-            custom_objects=GLOBAL_CUSTOM_OBJECTS,
-            compile=False
-        )
-    except Exception as e2:
-        print(f"Error cargando con tf.keras: {e2}. Intentando con keras nativo...")
-
-    # 3. Reintento con keras nativo
-    import keras
-    return keras.models.load_model(
+    # Reintento con tf.keras
+    return tf.keras.models.load_model(
         MODEL_PATH,
         custom_objects=GLOBAL_CUSTOM_OBJECTS,
-        compile=False,
-        safe_mode=False
+        compile=False
     )
 
 def load_tokenizer():
     return AutoTokenizer.from_pretrained(TOKENIZER_NAME)
 
 # =========================================================
-# PREPROCESADO DE AUDIO Y TEXTO
+# PREPROCESADO
 # =========================================================
 
 def load_audio_melspec(path: str, sr: int = SR) -> np.ndarray:
@@ -203,7 +228,7 @@ def load_lyrics_and_tokenize_from_file(tokenizer, path: str):
     return tokenize_lyrics_text(tokenizer, text)
 
 # =========================================================
-# INFERENCIA Y FORMATO JSON
+# INFERENCIA + FORMATO JSON
 # =========================================================
 
 def predict_and_format_song(
@@ -226,7 +251,6 @@ def predict_and_format_song(
     if lyric_file_path is not None and not os.path.exists(lyric_file_path):
         raise FileNotFoundError(f"Archivo de letra no encontrado: {lyric_file_path}")
 
-    # 1) Preprocesamiento
     melspec = load_audio_melspec(audio_file_path)
 
     if lyric_file_path is not None:
@@ -240,7 +264,6 @@ def predict_and_format_song(
     input_ids_batch = tf.expand_dims(input_ids, axis=0)
     attention_mask_batch = tf.expand_dims(attention_mask, axis=0)
 
-    # 2) Inferencia
     inputs = [melspec_batch, input_ids_batch, attention_mask_batch]
 
     try:
@@ -253,7 +276,6 @@ def predict_and_format_song(
         }
         raw_outputs = model(inputs_dict, training=False)
 
-    # Convertir salidas a arrays de numpy
     if isinstance(raw_outputs, (list, tuple)):
         output_list = [v.numpy() if hasattr(v, "numpy") else np.array(v) for v in raw_outputs]
     elif isinstance(raw_outputs, dict):
@@ -261,11 +283,10 @@ def predict_and_format_song(
     else:
         output_list = [raw_outputs.numpy()]
 
-    # El modelo retorna: [moods_fused, va_fused, moods_audio, moods_text, va_audio, va_text]
-    moods_fused_pred = output_list[0][0]  # Array de probabilidades de moods (16)
-    va_fused_pred = output_list[1][0]     # Array de Valence / Arousal (2)
+    # Estructura del modelo: [moods_fused, va_fused, moods_audio, moods_text, va_audio, va_text]
+    moods_fused_pred = output_list[0][0]
+    va_fused_pred = output_list[1][0]
 
-    # 3) Interpretar emociones (Valence/Arousal)
     valence_norm = float(va_fused_pred[0])
     arousal_norm = float(va_fused_pred[1])
 
@@ -289,7 +310,6 @@ def predict_and_format_song(
         "description": emotion_description,
     }
 
-    # 4) Interpretar Moods
     moods_output = []
     selected_probs = []
     selected_labels = []
@@ -310,7 +330,6 @@ def predict_and_format_song(
 
     moods_output = sorted(moods_output, key=lambda x: x["percentage"], reverse=True)
 
-    # 5) Generar JSON
     audio_file_name = os.path.basename(audio_file_path)
     result_json = {
         "song_info": {
