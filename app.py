@@ -1,5 +1,6 @@
 import os
 os.environ["USE_TF"] = "1"
+os.environ["TF_USE_LEGACY_KERAS"] = "1"
 
 import json
 import tempfile
@@ -7,118 +8,123 @@ import streamlit as st
 import matplotlib.pyplot as plt
 
 # =========================================================
-# 1. CONFIGURACIÓN DE PÁGINA
+# 1. CONFIGURACIÓN DE PÁGINA (Centrado estilo Imagen 1)
 # =========================================================
 st.set_page_config(
-    page_title="MER-ID | Reconocimiento de Emociones", 
+    page_title="MER-ID | Song Emotion Prediction", 
     page_icon="🎵",
-    layout="wide"
+    layout="centered"  # Centra el contenido en lugar de extenderlo en monitores anchos
 )
 
 # =========================================================
-# 2. INYECCIÓN CSS (Ocultar Header, Footer y Menú GitHub)
+# 2. INYECCIÓN CSS (Ocultar Header, Footer, Toolbar y Watermark)
 # =========================================================
 hide_streamlit_style = """
     <style>
-    #MainMenu {visibility: hidden;} /* Oculta el menú de los 3 puntos */
-    footer {visibility: hidden;}    /* Oculta el pie de página "Made with Streamlit" */
-    header {visibility: hidden;}    /* Oculta la barra superior con el icono de GitHub */
+    /* Ocultar elementos nativos de Streamlit */
+    #MainMenu {visibility: hidden; display: none !important;}
+    footer {visibility: hidden; display: none !important;}
+    header {visibility: hidden; display: none !important;}
+    [data-testid="stHeader"] {display: none !important;}
+    [data-testid="stToolbar"] {display: none !important;}
+    [data-testid="stDecoration"] {display: none !important;}
+    [data-testid="stStatusWidget"] {display: none !important;}
+    .stAppDeployButton {display: none !important;}
     </style>
 """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
-# Importamos las funciones actualizadas de inference.py
+# Importamos las funciones de inference.py
 from inference import load_model, load_tokenizer, predict_and_format_song
 
 # =========================================================
 # 3. INTERPRETACIÓN AUTOMÁTICA
 # =========================================================
 def generate_emotional_interpretation(valence, arousal):
-        if valence >= 0 and arousal >= 0:
-            tone = "energetic and positive"
-            extra = "suggesting excitement, happiness, or high engagement"
-        elif valence < 0 and arousal >= 0:
-            tone = "intense and tense"
-            extra = "which may reflect stress, anger, or strong emotional charge"
-        elif valence < 0 and arousal < 0:
-            tone = "low-energy and negative"
-            extra = "often associated with sadness, introspection, or melancholy"
-        else:
-            tone = "calm and positive"
-            extra = "indicating relaxation, peacefulness, or emotional stability"
+    if valence >= 0 and arousal >= 0:
+        tone = "energetic and positive"
+        extra = "suggesting excitement, happiness, or high engagement"
+    elif valence < 0 and arousal >= 0:
+        tone = "intense and tense"
+        extra = "which may reflect stress, anger, or strong emotional charge"
+    elif valence < 0 and arousal < 0:
+        tone = "low-energy and negative"
+        extra = "often associated with sadness, introspection, or melancholy"
+    else:
+        tone = "calm and positive"
+        extra = "indicating relaxation, peacefulness, or emotional stability"
 
-        intensity = abs(arousal)
-        if intensity > 0.6:
-            intensity_desc = "a strong emotional intensity"
-        elif intensity > 0.3:
-            intensity_desc = "a moderate emotional intensity"
-        else:
-            intensity_desc = "a soft and subtle emotional tone"
+    intensity = abs(arousal)
+    if intensity > 0.6:
+        intensity_desc = "a strong emotional intensity"
+    elif intensity > 0.3:
+        intensity_desc = "a moderate emotional intensity"
+    else:
+        intensity_desc = "a soft and subtle emotional tone"
 
-        return f"""
-    Overall, the song presents a **{tone}** profile, {extra}.  
-    It carries **{intensity_desc}**, which shapes how the emotion is perceived throughout the track.
-    """
+    return f"""
+Overall, the song presents a **{tone}** profile, {extra}.  
+It carries **{intensity_desc}**, which shapes how the emotion is perceived throughout the track.
+"""
 
 # =========================================================
 # 4. CARGA MODELO Y TOKENIZER CON CACHÉ
 # =========================================================
 @st.cache_resource
 def get_model_and_tokenizer():
-        model = load_model()
-        tok = load_tokenizer()
-        return model, tok
+    model = load_model()
+    tok = load_tokenizer()
+    return model, tok
 
 model, tokenizer = get_model_and_tokenizer()
 
 # =========================================================
-# 5. INTERFAZ Y COMPONENTES DE ENTRADA
+# 5. INTERFAZ Y COMPONENTES DE ENTRADA (En Inglés)
 # =========================================================
-st.title("🎵 Predicción de Emociones y Moods (MER-ID)")
-st.caption("Entradas: Audio (.mp3, .wav, .ogg) + Letra (.txt o texto directo). Salida: Reporte de inferencia en tiempo real + JSON.")
+st.title("🎵 Song Emotion Prediction")
+st.caption("Inputs: Audio (.mp3, .wav, .ogg) + Lyrics (.txt file or direct text). Output: Real-time inference report + JSON.")
 
-audio_file = st.file_uploader("Sube el audio", type=["mp3", "wav", "ogg"])
+audio_file = st.file_uploader("Upload audio", type=["mp3", "wav", "ogg"])
 
 lyrics_mode = st.radio(
-    "Letra: ¿cómo la vas a ingresar?",
-    ["Desde archivo .txt", "Escribir/pegar texto"],
+    "Lyrics: how will you provide them?",
+    ["From .txt file", "Type/paste text"],
     horizontal=True
 )
 
 lyrics_file = None
 lyrics_text = None
 
-if lyrics_mode == "Desde archivo .txt":
-    lyrics_file = st.file_uploader("Sube la letra (.txt)", type=["txt"])
+if lyrics_mode == "From .txt file":
+    lyrics_file = st.file_uploader("Upload lyrics (.txt)", type=["txt"])
 else:
-    lyrics_text = st.text_area("Pega la letra aquí", height=220)
+    lyrics_text = st.text_area("Paste lyrics here", height=220)
 
 col1, col2 = st.columns(2)
 with col1:
-    title = st.text_input("Título (opcional)")
+    title = st.text_input("Title (optional)")
 with col2:
-    artist = st.text_input("Artista (opcional)")
+    artist = st.text_input("Artist (optional)")
 
-mood_threshold = st.slider("Umbral para incluir mood", 0.0, 0.9, 0.3, 0.05)
+mood_threshold = st.slider("Mood inclusion threshold", 0.0, 0.9, 0.3, 0.05)
 
 # =========================================================
 # 6. EJECUCIÓN DE INFERENCIA
 # =========================================================
-if st.button("🔍 Analizar"):
+if st.button("🔍 Analyze"):
     if audio_file is None:
-        st.error("Sube un archivo de audio primero.")
+        st.error("Please upload an audio file first.")
         st.stop()
 
-    if lyrics_mode == "Desde archivo .txt" and lyrics_file is None:
-        st.error("Sube un archivo .txt con la letra.")
+    if lyrics_mode == "From .txt file" and lyrics_file is None:
+        st.error("Please upload a .txt file with the lyrics.")
         st.stop()
 
-    if lyrics_mode == "Escribir/pegar texto" and (not lyrics_text or not lyrics_text.strip()):
-        st.error("Debes pegar o escribir la letra.")
+    if lyrics_mode == "Type/paste text" and (not lyrics_text or not lyrics_text.strip()):
+        st.error("Please type or paste the lyrics.")
         st.stop()
 
-    with st.spinner("Procesando señal acústica y texto..."):
-        # Guardar audio temporal
+    with st.spinner("Processing acoustic signal and text..."):
         suffix = "." + audio_file.name.split(".")[-1].lower()
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_audio:
             tmp_audio.write(audio_file.read())
@@ -127,8 +133,7 @@ if st.button("🔍 Analizar"):
         lyric_path = None
         lyric_text_value = None
 
-        # Guardar letra temporal si viene por archivo
-        if lyrics_mode == "Desde archivo .txt":
+        if lyrics_mode == "From .txt file":
             with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp_txt:
                 tmp_txt.write(lyrics_file.read())
                 lyric_path = tmp_txt.name
@@ -147,10 +152,10 @@ if st.button("🔍 Analizar"):
                 mood_threshold=mood_threshold,
             )
         except Exception as e:
-            st.error(f"Error en la inferencia: {e}")
+            st.error(f"Inference error: {e}")
             st.stop()
 
-    st.success("Análisis completado ✅")
+    st.success("Analysis complete ✅")
 
     data = json.loads(result_json_str)
 
@@ -178,9 +183,6 @@ if st.button("🔍 Analizar"):
 
     st.divider()
 
-    # =========================
-    # EMOTIONAL PROFILE
-    # =========================
     st.subheader("💡 Emotional Interpretation")
 
     st.markdown(f"""
@@ -199,7 +201,6 @@ if st.button("🔍 Analizar"):
     ⚠️ *Note: These values are model-based estimations and may vary depending on musical context and interpretation.*
     """)
 
-    # INTERPRETACIÓN AUTOMÁTICA
     interpretation = generate_emotional_interpretation(
         emotions["valence_normalized"],
         emotions["arousal_normalized"]
@@ -210,9 +211,6 @@ if st.button("🔍 Analizar"):
 
     st.divider()
 
-    # =========================
-    # GRÁFICO CARTESIANO DE RUSSELL
-    # =========================
     st.subheader("📊 Emotional Quadrant")
 
     valence = emotions["valence_normalized"]
@@ -225,17 +223,15 @@ if st.button("🔍 Analizar"):
 
     ax.scatter(valence, arousal, s=120, color='black', zorder=5)
 
-    # Determinar color por cuadrante
     if valence >= 0 and arousal >= 0:
-        color = "#FFD6E8"  # pastel rosado (Q1)
+        color = "#FFD6E8"
     elif valence < 0 and arousal >= 0:
-        color = "#FFE5CC"  # pastel naranja (Q2)
+        color = "#FFE5CC"
     elif valence < 0 and arousal < 0:
-        color = "#D6E0FF"  # pastel azul (Q3)
+        color = "#D6E0FF"
     else:
-        color = "#D6F5E8"  # pastel verde (Q4)
+        color = "#D6F5E8"
 
-    # Pintar cuadrante correspondiente
     if valence >= 0 and arousal >= 0:
         ax.fill_between([0, 1], 0, 1, alpha=0.4, color=color)
     elif valence < 0 and arousal >= 0:
@@ -254,20 +250,16 @@ if st.button("🔍 Analizar"):
 
     ax.text(valence, arousal, f"  {top_mood}", verticalalignment='bottom', fontweight='bold')
 
-    # Etiquetado de cuadrantes
     ax.text(0.5, 0.8, "Q1\nHappy / Excited", ha='center', va='center')
     ax.text(-0.5, 0.8, "Q2\nAngry / Stressed", ha='center', va='center')
     ax.text(-0.5, -0.8, "Q3\nSad / Depressed", ha='center', va='center')
     ax.text(0.5, -0.8, "Q4\nCalm / Relaxed", ha='center', va='center')
 
     st.pyplot(fig)
-    plt.close(fig) # Liberar memoria RAM del gráfico
+    plt.close(fig)
 
     st.divider()
 
-    # =========================
-    # DESGLOSE DE MOODS
-    # =========================
     st.subheader("🎭 Mood Breakdown")
 
     if moods:
@@ -287,15 +279,12 @@ if st.button("🔍 Analizar"):
 
     st.divider()
 
-    # =========================
-    # INSPECCIÓN Y DESCARGA JSON
-    # =========================
     with st.expander("📄 View JSON output"):
         st.json(data)
 
     st.download_button(
-        "Descargar JSON",
+        "Download JSON",
         data=result_json_str,
-        file_name="prediccion.json",
+        file_name="prediction.json",
         mime="application/json",
     )
