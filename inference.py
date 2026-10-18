@@ -1,222 +1,26 @@
 import os
 import sys
-import inspect
+import zipfile
 
-# Forzar configuración de entorno
+# Configuración de entorno
 os.environ["USE_TF"] = "1"
 os.environ["TF_USE_LEGACY_KERAS"] = "1"
 
 import json
 import tempfile
-import importlib
 import numpy as np
 import librosa
 
 import tensorflow as tf
-import keras
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, TFRobertaModel
 import gdown
 
-# Importar explícitamente el módulo TensorFlow de RoBERTa
-import transformers
-try:
-    import transformers.models.roberta.modeling_tf_roberta as roberta_mod
-except Exception:
-    roberta_mod = None
-
 # =========================================================
-# PARCHE RESILIENTE DE INVOCACIÓN DE CAPAS (SAFE LAYER CALL)
-# =========================================================
-def apply_class_level_layer_patches():
-    """Intercepta la llamada a capas de Keras y HuggingFace para evitar errores de kwargs en la reconstrucción."""
-    layer_classes = []
-
-    for mod_name, class_name in [
-        ("tf_keras.src.engine.base_layer", "Layer"),
-        ("keras.src.engine.base_layer", "Layer"),
-        ("keras.src.layers", "Layer"),
-        ("keras.layers", "Layer"),
-        ("tensorflow.keras.layers", "Layer"),
-        ("transformers.modeling_tf_utils", "TFPreTrainedModel"),
-        ("transformers.models.roberta.modeling_tf_roberta", "TFRobertaPreTrainedModel"),
-        ("transformers.models.roberta.modeling_tf_roberta", "TFRobertaMainLayer"),
-    ]:
-        try:
-            m = importlib.import_module(mod_name)
-            cls = getattr(m, class_name, None)
-            if cls and cls not in layer_classes:
-                layer_classes.append(cls)
-        except Exception:
-            pass
-
-    for cls in layer_classes:
-        if hasattr(cls, "__call__"):
-            orig_call = getattr(cls, "__call__")
-            if not getattr(orig_call, "_is_patched", False):
-                def make_patched_call(original_fn):
-                    def patched_call(self, *args, **kwargs):
-                        # 1. Intentar llamada directa original
-                        try:
-                            return original_fn(self, *args, **kwargs)
-                        except TypeError:
-                            pass
-
-                        # 2. Limpiar kwargs no soportados por capas HF (como 'mask')
-                        clean_kw = dict(kwargs)
-                        clean_kw.pop("mask", None)
-
-                        target_fn = getattr(self, "call", original_fn)
-                        try:
-                            sig = inspect.signature(target_fn)
-                            has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
-                            param_names = set(sig.parameters.keys())
-                            if not has_var_kw:
-                                clean_kw = {k: v for k, v in clean_kw.items() if k in param_names}
-                        except Exception:
-                            pass
-
-                        try:
-                            return original_fn(self, *args, **clean_kw)
-                        except TypeError:
-                            pass
-
-                        # 3. Desempaquetar si los tensores vienen dentro de una lista/tupla
-                        if len(args) == 1 and isinstance(args[0], (list, tuple)):
-                            inner_args = args[0]
-                            try:
-                                return original_fn(self, *inner_args, **clean_kw)
-                            except TypeError:
-                                pass
-
-                            kw_no_dups = dict(clean_kw)
-                            kw_no_dups.pop("attention_mask", None)
-                            kw_no_dups.pop("token_type_ids", None)
-                            kw_no_dups.pop("position_ids", None)
-                            try:
-                                return original_fn(self, *inner_args, **kw_no_dups)
-                            except TypeError:
-                                pass
-
-                        # 4. Intentar invocación directa a .call()
-                        if hasattr(self, "call"):
-                            try:
-                                return self.call(*args, **clean_kw)
-                            except TypeError:
-                                pass
-
-                        return original_fn(self, *args)
-
-                    patched_call._is_patched = True
-                    return patched_call
-
-                setattr(cls, "__call__", make_patched_call(orig_call))
-
-apply_class_level_layer_patches()
-
-# =========================================================
-# REGISTRO GLOBAL Y DINÁMICO DE CUSTOM OBJECTS
-# =========================================================
-GLOBAL_CUSTOM_OBJECTS = {}
-
-def build_custom_objects_registry():
-    """Escanea y registra todas las clases disponibles en Keras y Transformers."""
-    modules_to_scan = [
-        transformers,
-        roberta_mod,
-        keras.layers,
-        tf.keras.layers,
-    ]
-
-    try:
-        import tf_keras
-        modules_to_scan.append(tf_keras.layers)
-    except Exception:
-        pass
-
-    for mod in modules_to_scan:
-        if mod is None:
-            continue
-        for name, cls in getattr(mod, "__dict__", {}).items():
-            if isinstance(cls, type):
-                GLOBAL_CUSTOM_OBJECTS[name] = cls
-                GLOBAL_CUSTOM_OBJECTS[f"Custom>{name}"] = cls
-                GLOBAL_CUSTOM_OBJECTS[f"transformers>{name}"] = cls
-                if hasattr(mod, "__name__"):
-                    GLOBAL_CUSTOM_OBJECTS[f"{mod.__name__}>{name}"] = cls
-
-                try:
-                    keras.saving.register_keras_serializable(package="Custom", name=name)(cls)
-                    keras.saving.register_keras_serializable(package="transformers", name=name)(cls)
-                except Exception:
-                    pass
-
-build_custom_objects_registry()
-
-# =========================================================
-# PARCHE DE DESERIALIZACIÓN EXHAUSTIVA EN KERAS 3
-# =========================================================
-try:
-    import keras.src.saving.serialization_lib as keras_saving
-    _orig_retrieve = keras_saving._retrieve_class_or_fn
-
-    def _robust_retrieve(name, registered_name, module, obj_type, full_config, custom_objects=None):
-        merged = dict(GLOBAL_CUSTOM_OBJECTS)
-        if custom_objects:
-            merged.update(custom_objects)
-
-        try:
-            return _orig_retrieve(name, registered_name, module, obj_type, full_config, merged)
-        except (TypeError, ValueError):
-            pass
-
-        clean_name = name.split(">")[-1].split(".")[-1] if name else ""
-        clean_reg = registered_name.split(">")[-1].split(".")[-1] if registered_name else ""
-
-        keys_to_check = [registered_name, name, clean_reg, clean_name]
-        for k in keys_to_check:
-            if k and k in merged:
-                return merged[k]
-
-        if module:
-            try:
-                mod = importlib.import_module(module)
-                for k in [clean_reg, clean_name]:
-                    if k and hasattr(mod, k):
-                        return getattr(mod, k)
-            except Exception:
-                pass
-
-        for search_term in [clean_reg, clean_name]:
-            if not search_term:
-                continue
-            for mod_name, mod in list(sys.modules.items()):
-                if mod and ("transformers" in mod_name or "keras" in mod_name or "tensorflow" in mod_name):
-                    if hasattr(mod, search_term):
-                        obj = getattr(mod, search_term)
-                        if isinstance(obj, type):
-                            return obj
-
-        err_msg = f"No se pudo localizar {obj_type} '{name}' (registered_name='{registered_name}', module='{module}')"
-        print(f"❌ ERROR CRÍTICO DE DESERIALIZACIÓN: {err_msg}")
-        raise TypeError(err_msg)
-
-    keras_saving._retrieve_class_or_fn = _robust_retrieve
-except Exception as e:
-    print(f"Aviso parche deserializador: {e}")
-
-# =========================================================
-# CONFIGURACIÓN BÁSICA Y DESCARGA DE MODELO
+# CONFIGURACIÓN BÁSICA Y DESCARGA
 # =========================================================
 
 MODEL_PATH = "my_model.keras"
 DRIVE_FILE_ID = "1onGKhJcSQamYZsdJZuC9OKixT5igAaRZ"
-
-def descargar_modelo():
-    if not os.path.exists(MODEL_PATH):
-        url = f"https://drive.google.com/uc?id={DRIVE_FILE_ID}"
-        print("Descargando modelo (.keras)...")
-        gdown.download(url, MODEL_PATH, quiet=False)
-        print("Modelo listo ✅")
 
 TOKENIZER_NAME = "roberta-base"
 
@@ -234,49 +38,121 @@ MOOD_LABELS = [
     "Calm", "Relaxed", "Serene", "Contented"
 ]
 
+def descargar_modelo():
+    if not os.path.exists(MODEL_PATH):
+        url = f"https://drive.google.com/uc?id={DRIVE_FILE_ID}"
+        print("Descargando modelo (.keras)...")
+        gdown.download(url, MODEL_PATH, quiet=False)
+        print("Modelo listo ✅")
+
+# =========================================================
+# CONSTRUCCIÓN EXPLICITA DE ARQUITECTURA (COLAB)
+# =========================================================
+
+def build_multimodal_model():
+    """Reconstruye la arquitectura exacta declarada en Colab."""
+    num_moods = len(MOOD_LABELS)
+
+    # Entradas
+    audio_input = tf.keras.Input(shape=(MAX_FRAMES, N_MELS, 1), name="audio_melspec")
+    input_ids_in = tf.keras.Input(shape=(MAX_LEN,), dtype=tf.int32, name="input_ids")
+    att_mask_in  = tf.keras.Input(shape=(MAX_LEN,), dtype=tf.int32, name="attention_mask")
+
+    # --- Rama Audio ---
+    x = tf.keras.layers.Conv2D(32, (3, 3), activation='relu', padding='same')(audio_input)
+    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
+    x = tf.keras.layers.Dropout(0.5)(x)
+
+    x = tf.keras.layers.Conv2D(64, (3, 3), activation='relu', padding='same')(x)
+    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
+    x = tf.keras.layers.Dropout(0.5)(x)
+
+    new_frames = MAX_FRAMES // 4  # 250
+    new_mels = N_MELS // 4        # 32
+
+    x = tf.keras.layers.Reshape((new_frames, new_mels * 64))(x)
+    x = tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(128, return_sequences=True))(x)
+    x = tf.keras.layers.Dropout(0.5)(x)
+    x = tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(256))(x)
+
+    x = tf.keras.layers.Dense(256, activation="relu")(x)
+    x = tf.keras.layers.Dropout(0.5)(x)
+
+    audio_emb = tf.keras.layers.Dense(256, activation="relu", name="audio_emb")(x)
+
+    va_audio   = tf.keras.layers.Dense(2, activation="tanh", name="va_audio")(audio_emb)
+    moods_audio = tf.keras.layers.Dense(num_moods, activation="sigmoid", name="moods_audio")(audio_emb)
+
+    # --- Rama Texto ---
+    text_encoder = TFRobertaModel.from_pretrained(TOKENIZER_NAME)
+    text_outputs = text_encoder(input_ids=input_ids_in, attention_mask=att_mask_in)
+    cls_token = text_outputs.last_hidden_state[:, 0, :]
+
+    t = tf.keras.layers.Dense(256, activation="relu")(cls_token)
+    t = tf.keras.layers.Dropout(0.5)(t)
+
+    text_emb = tf.keras.layers.Dense(256, activation="relu", name="text_emb")(t)
+
+    va_text    = tf.keras.layers.Dense(2, activation="tanh", name="va_text")(text_emb)
+    moods_text = tf.keras.layers.Dense(num_moods, activation="sigmoid", name="moods_text")(text_emb)
+
+    # --- Fusión ---
+    fusion_concat = tf.keras.layers.Concatenate(name="fusion_concat")([audio_emb, text_emb])
+    f = tf.keras.layers.Dense(256, activation="relu")(fusion_concat)
+    f = tf.keras.layers.Dropout(0.5)(f)
+    fusion_emb = tf.keras.layers.Dense(128, activation="relu", name="fusion_emb")(f)
+
+    va_fused    = tf.keras.layers.Dense(2, activation="tanh", name="va_fused")(fusion_emb)
+    moods_fused = tf.keras.layers.Dense(num_moods, activation="sigmoid", name="moods_fused")(fusion_emb)
+
+    # Modelo completo
+    model = tf.keras.Model(
+        inputs=[audio_input, input_ids_in, att_mask_in],
+        outputs=[moods_fused, va_fused, moods_audio, moods_text, va_audio, va_text],
+        name="multimodal_emotion_mood_model"
+    )
+    return model
+
 # =========================================================
 # CARGA DEL MODELO Y TOKENIZER
 # =========================================================
 
 def load_model():
     descargar_modelo()
-    apply_class_level_layer_patches()
-    build_custom_objects_registry()
+    print("Construyendo la arquitectura del modelo...")
+    model = build_multimodal_model()
 
-    # 1. Carga mediante keras nativo con Custom Object Scope
+    print("Cargando pesos entrenados...")
     try:
-        with keras.saving.custom_object_scope(GLOBAL_CUSTOM_OBJECTS):
-            return keras.models.load_model(
-                MODEL_PATH,
-                compile=False,
-                safe_mode=False
-            )
-    except Exception as e1:
-        print(f"Aviso carga keras nativo: {e1}. Intentando con tf.keras...")
+        model.load_weights(MODEL_PATH)
+        print("Pesos cargados directamente desde .keras ✅")
+    except Exception as e:
+        print(f"Extrayendo archivo de pesos por compatibilidad: {e}")
+        extracted_dir = "extracted_weights"
+        os.makedirs(extracted_dir, exist_ok=True)
+        with zipfile.ZipFile(MODEL_PATH, 'r') as zip_ref:
+            zip_ref.extractall(extracted_dir)
 
-    # 2. Carga mediante tf.keras
-    try:
-        return tf.keras.models.load_model(
-            MODEL_PATH,
-            custom_objects=GLOBAL_CUSTOM_OBJECTS,
-            compile=False
-        )
-    except Exception as e2:
-        print(f"Aviso carga tf.keras: {e2}. Intentando con tf_keras...")
+        weights_file = None
+        for root, dirs, files in os.walk(extracted_dir):
+            for f in files:
+                if f.endswith(".h5") or f.endswith(".weights.h5"):
+                    weights_file = os.path.join(root, f)
+                    break
 
-    # 3. Carga mediante tf_keras
-    import tf_keras as tfk
-    return tfk.models.load_model(
-        MODEL_PATH,
-        custom_objects=GLOBAL_CUSTOM_OBJECTS,
-        compile=False
-    )
+        if weights_file:
+            model.load_weights(weights_file)
+            print("Pesos cargados con éxito desde archivo .h5 interno ✅")
+        else:
+            model.load_weights(MODEL_PATH, by_name=True)
+
+    return model
 
 def load_tokenizer():
     return AutoTokenizer.from_pretrained(TOKENIZER_NAME)
 
 # =========================================================
-# PREPROCESADO
+# PREPROCESADO DE AUDIO Y TEXTO
 # =========================================================
 
 def load_audio_melspec(path: str, sr: int = SR) -> np.ndarray:
@@ -325,7 +201,7 @@ def load_lyrics_and_tokenize_from_file(tokenizer, path: str):
     return tokenize_lyrics_text(tokenizer, text)
 
 # =========================================================
-# INFERENCIA + FORMATO JSON
+# INFERENCIA Y FORMATO JSON
 # =========================================================
 
 def predict_and_format_song(
@@ -363,15 +239,7 @@ def predict_and_format_song(
 
     inputs = [melspec_batch, input_ids_batch, attention_mask_batch]
 
-    try:
-        raw_outputs = model(inputs, training=False)
-    except Exception:
-        inputs_dict = {
-            "audio_melspec": melspec_batch,
-            "input_ids": input_ids_batch,
-            "attention_mask": attention_mask_batch,
-        }
-        raw_outputs = model(inputs_dict, training=False)
+    raw_outputs = model(inputs, training=False)
 
     if isinstance(raw_outputs, (list, tuple)):
         output_list = [v.numpy() if hasattr(v, "numpy") else np.array(v) for v in raw_outputs]
