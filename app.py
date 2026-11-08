@@ -8,10 +8,10 @@ import streamlit as st
 import matplotlib.pyplot as plt
 
 # =========================================================
-# 1. CONFIGURACIÓN DE PÁGINA (Centrado estilo Imagen 1)
+# 1. CONFIGURACIÓN DE PÁGINA
 # =========================================================
 st.set_page_config(
-    page_title="MER-ID | Song Emotion Prediction", 
+    page_title="MER-CLARO | Song Emotion Prediction", 
     page_icon="🎵",
     layout="centered"  # Centra el contenido en lugar de extenderlo en monitores anchos
 )

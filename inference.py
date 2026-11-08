@@ -49,7 +49,7 @@ def descargar_modelo():
         print("Modelo listo ✅")
 
 # =========================================================
-# CONSTRUCCIÓN EXPLICITA DE ARQUITECTURA (COLAB)
+# CONSTRUCCIÓN EXPLICITA DE ARQUITECTURA
 # =========================================================
 
 def build_multimodal_model():
